@@ -1,0 +1,11 @@
+target/*
+.vscode/*
+.DS_Store
+.idea/*
+*.log
+*.sqlite
+*.csv
+*.parquet
+*.npy
+*.npz
+*.ckpt
