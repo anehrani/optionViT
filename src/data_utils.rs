@@ -1,10 +1,12 @@
-use chrono::{NaiveDate, DateTime, Utc};
+use chrono::{DateTime, Datelike, NaiveDate};
+use polars::prelude::*;
 use reqwest;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::error::Error;
-use polars::prelude::*;
-use rustc_hash::FxHashMap;
+use std::{collections::BTreeSet, error::Error};
+
+pub type DynError = Box<dyn Error + Send + Sync>;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct TradeData {
@@ -113,76 +115,106 @@ impl DeribitClient {
         }
     }
 
-    /// Downloads instruments data from Deribit for a specific asset and expiry date
-    /// 
-    /// # Arguments
-    /// * `asset` - The asset symbol (e.g., "BTC", "ETH")
-    /// * `expiry_date` - The expiry date in format "YYYY-MM-DD" (e.g., "2024-03-29")
-    /// 
-    /// # Returns
-    /// * `Result<Vec<Instrument>, Box<dyn Error>>` - List of instruments or error
-    pub async fn get_instruments_by_expiry(
-        &self,
-        asset: &str,
-        expiry_date: &str,
-    ) -> Result<Vec<Instrument>, Box<dyn Error>> {
-        // Parse the date to validate format and convert to Deribit format
-        let date = NaiveDate::parse_from_str(expiry_date, "%Y-%m-%d")?;
-        let deribit_expiry = date.format("%d%b%y").to_string().to_uppercase();
-        
-        // Get all instruments for the currency
+    async fn fetch_instruments(&self, asset: &str) -> Result<Vec<Instrument>, DynError> {
         let url = format!("{}/public/get_instruments", self.base_url);
         let params = [
             ("currency", asset.to_uppercase()),
             ("expired", "false".to_string()),
         ];
 
-        let response = self.client
-            .get(&url)
-            .query(&params)
-            .send()
-            .await?;
+        let response = self.client.get(&url).query(&params).send().await?;
 
         if !response.status().is_success() {
             return Err(format!("API request failed with status: {}", response.status()).into());
         }
 
         let deribit_response: DeribitResponse = response.json().await?;
-        
-        // Parse instruments from the result
         let instruments: Vec<Instrument> = serde_json::from_value(deribit_response.result)?;
-        
+        Ok(instruments)
+    }
+
+    pub async fn get_available_expiry_dates(
+        &self,
+        asset: &str,
+    ) -> Result<Vec<String>, DynError> {
+        let instruments = self.fetch_instruments(asset).await?;
+        let mut expiries = BTreeSet::new();
+
+        println!("🔍 Processing {} instruments to extract expiry dates", instruments.len());
+
+        for instrument in instruments {
+            if instrument.kind == "option" {  // Only process options
+                let expiry_dt = DateTime::from_timestamp(instrument.expiration_timestamp / 1000, 0)
+                    .unwrap_or_default();
+                let expiry_iso = expiry_dt.format("%Y-%m-%d").to_string();
+                expiries.insert(expiry_iso);
+            }
+        }
+
+        let result: Vec<String> = expiries.into_iter().collect();
+        println!("✅ Found {} unique expiry dates for {}", result.len(), asset);
+        if result.len() > 0 {
+            println!("📅 First few expiry dates: {:?}", result.iter().take(5).collect::<Vec<_>>());
+        }
+
+        Ok(result)
+    }
+
+    /// Downloads instruments data from Deribit for a specific asset and expiry date
+    ///
+    /// # Arguments
+    /// * `asset` - The asset symbol (e.g., "BTC", "ETH")
+    /// * `expiry_date` - The expiry date in format "YYYY-MM-DD" (e.g., "2024-03-29")
+    ///
+    /// # Returns
+    /// * `Result<Vec<Instrument>, DynError>` - List of instruments or error
+    pub async fn get_instruments_by_expiry(
+        &self,
+        asset: &str,
+        expiry_date: &str,
+    ) -> Result<Vec<Instrument>, DynError> {
+        // Parse the date to validate format and convert to Deribit format
+        let date = NaiveDate::parse_from_str(expiry_date, "%Y-%m-%d")?;
+        // Deribit uses single digit days (not zero-padded): 1OCT25, not 01OCT25
+        let deribit_expiry = format!("{}{}{}",
+            date.day(),  // Single digit day without zero padding
+            date.format("%b").to_string().to_uppercase(),  // Month abbreviation
+            date.format("%y")  // Two digit year
+        );
+        let instruments = self.fetch_instruments(asset).await?;
+
+        println!("🔍 Looking for instruments with expiry token: '{}'", deribit_expiry);
+        println!("📊 Total instruments fetched: {}", instruments.len());
+
         // Filter instruments by expiry date
         let filtered_instruments: Vec<Instrument> = instruments
             .into_iter()
             .filter(|inst| inst.instrument_name.contains(&deribit_expiry))
             .collect();
 
+        println!("✅ Found {} instruments matching expiry: {}", filtered_instruments.len(), deribit_expiry);
+        if filtered_instruments.len() > 0 {
+            println!("📋 First few matches:");
+            for inst in filtered_instruments.iter().take(3) {
+                println!("  - {}", inst.instrument_name);
+            }
+        }
+
         Ok(filtered_instruments)
     }
 
     /// Downloads order book data for a specific instrument
-    /// 
+    ///
     /// # Arguments
     /// * `instrument_name` - The full instrument name (e.g., "BTC-29MAR24-50000-C")
-    /// 
+    ///
     /// # Returns
-    /// * `Result<OrderBook, Box<dyn Error>>` - Order book data or error
-    pub async fn get_order_book(
-        &self,
-        instrument_name: &str,
-    ) -> Result<OrderBook, Box<dyn Error>> {
+    /// * `Result<OrderBook, DynError>` - Order book data or error
+    pub async fn get_order_book(&self, instrument_name: &str) -> Result<OrderBook, DynError> {
         let url = format!("{}/public/get_order_book", self.base_url);
-        let params = [
-            ("instrument_name", instrument_name),
-            ("depth", "10"),
-        ];
+        let params = [("instrument_name", instrument_name), ("depth", "10")];
 
-        let response = self.client
-            .get(&url)
-            .query(&params)
-            .send()
-            .await?;
+        let response = self.client.get(&url).query(&params).send().await?;
 
         if !response.status().is_success() {
             return Err(format!("API request failed with status: {}", response.status()).into());
@@ -195,52 +227,50 @@ impl DeribitClient {
     }
 
     /// Downloads trade data for a specific instrument
-    /// 
+    ///
     /// # Arguments
     /// * `instrument_name` - The full instrument name (e.g., "BTC-29MAR24-50000-C")
     /// * `start_timestamp` - Start timestamp in milliseconds
     /// * `end_timestamp` - End timestamp in milliseconds
-    /// 
+    ///
     /// # Returns
-    /// * `Result<Vec<TradeData>, Box<dyn Error>>` - Trade data or error
+    /// * `Result<Vec<TradeData>, DynError>` - Trade data or error
     pub async fn get_trades(
         &self,
         instrument_name: &str,
         start_timestamp: Option<i64>,
         end_timestamp: Option<i64>,
-    ) -> Result<Vec<TradeData>, Box<dyn Error>> {
+    ) -> Result<Vec<TradeData>, DynError> {
         let url = format!("{}/public/get_last_trades_by_instrument", self.base_url);
-        
+
         let mut params = vec![
             ("instrument_name", instrument_name.to_string()),
             ("count", "1000".to_string()), // Max allowed
             ("include_old", "true".to_string()),
         ];
-        
+
         if let Some(start) = start_timestamp {
             params.push(("start_timestamp", start.to_string()));
         }
-        
+
         if let Some(end) = end_timestamp {
             params.push(("end_timestamp", end.to_string()));
         }
 
-        let response = self.client
-            .get(&url)
-            .query(&params)
-            .send()
-            .await?;
+        let response = self.client.get(&url).query(&params).send().await?;
 
         if !response.status().is_success() {
             return Err(format!("API request failed with status: {}", response.status()).into());
         }
 
         let deribit_response: DeribitResponse = response.json().await?;
-        
+
         // Parse trades from the result
-        let trades_value = deribit_response.result.get("trades")
+        let trades_value = deribit_response
+            .result
+            .get("trades")
             .ok_or("No trades field in response")?;
-        
+
         let mut trades = Vec::new();
         if let Value::Array(trade_array) = trades_value {
             for trade_val in trade_array {
@@ -254,31 +284,24 @@ impl DeribitClient {
     }
 
     /// Downloads open interest data for a specific instrument
-    /// 
+    ///
     /// # Arguments
     /// * `instrument_name` - The full instrument name (e.g., "BTC-29MAR24-50000-C")
-    /// 
+    ///
     /// # Returns
-    /// * `Result<Option<f64>, Box<dyn Error>>` - Open interest value or error
-    pub async fn get_open_interest(
-        &self,
-        instrument_name: &str,
-    ) -> Result<Option<f64>, Box<dyn Error>> {
+    /// * `Result<Option<f64>, DynError>` - Open interest value or error
+    pub async fn get_open_interest(&self, instrument_name: &str) -> Result<Option<f64>, DynError> {
         let url = format!("{}/public/get_book_summary_by_instrument", self.base_url);
         let params = [("instrument_name", instrument_name)];
 
-        let response = self.client
-            .get(&url)
-            .query(&params)
-            .send()
-            .await?;
+        let response = self.client.get(&url).query(&params).send().await?;
 
         if !response.status().is_success() {
             return Ok(None); // Return None instead of error for missing data
         }
 
         let deribit_response: DeribitResponse = response.json().await?;
-        
+
         // Extract open interest from the result
         if let Some(open_interest_val) = deribit_response.result.get("open_interest") {
             if let Some(oi) = open_interest_val.as_f64() {
@@ -290,27 +313,23 @@ impl DeribitClient {
     }
 
     /// Downloads comprehensive book summary data for multiple instruments
-    /// 
+    ///
     /// # Arguments
     /// * `currency` - The currency (e.g., "BTC", "ETH")
-    /// 
+    ///
     /// # Returns
-    /// * `Result<FxHashMap<String, f64>, Box<dyn Error>>` - Map of instrument -> open interest
+    /// * `Result<FxHashMap<String, f64>, DynError>` - Map of instrument -> open interest
     pub async fn get_all_open_interests(
         &self,
         currency: &str,
-    ) -> Result<FxHashMap<String, f64>, Box<dyn Error>> {
+    ) -> Result<FxHashMap<String, f64>, DynError> {
         let url = format!("{}/public/get_book_summary_by_currency", self.base_url);
         let params = [
             ("currency", currency.to_uppercase()),
             ("kind", "option".to_string()),
         ];
 
-        let response = self.client
-            .get(&url)
-            .query(&params)
-            .send()
-            .await?;
+        let response = self.client.get(&url).query(&params).send().await?;
 
         if !response.status().is_success() {
             return Err(format!("API request failed with status: {}", response.status()).into());
@@ -321,13 +340,13 @@ impl DeribitClient {
         let mut positive_count = 0;
         let mut negative_count = 0;
         let mut zero_count = 0;
-        
+
         // Parse the result array
         if let Value::Array(summaries) = &deribit_response.result {
             for summary in summaries {
                 if let (Some(instrument_name), Some(open_interest)) = (
                     summary.get("instrument_name").and_then(|v| v.as_str()),
-                    summary.get("open_interest").and_then(|v| v.as_f64())
+                    summary.get("open_interest").and_then(|v| v.as_f64()),
                 ) {
                     // Count different types of open interest values
                     if open_interest > 0.0 {
@@ -337,7 +356,7 @@ impl DeribitClient {
                     } else {
                         zero_count += 1;
                     }
-                    
+
                     open_interests.insert(instrument_name.to_string(), open_interest);
                 }
             }
@@ -353,153 +372,170 @@ impl DeribitClient {
     }
 
     /// Downloads ticker data for instruments matching asset and expiry
-    /// 
+    ///
     /// # Arguments
     /// * `asset` - The asset symbol (e.g., "BTC", "ETH")
     /// * `expiry_date` - The expiry date in format "YYYY-MM-DD"
-    /// 
+    ///
     /// # Returns
-    /// * `Result<Vec<Value>, Box<dyn Error>>` - Ticker data or error
+    /// * `Result<Vec<Value>, DynError>` - Ticker data or error
     pub async fn get_ticker_by_expiry(
         &self,
         asset: &str,
         expiry_date: &str,
-    ) -> Result<Vec<Value>, Box<dyn Error>> {
+    ) -> Result<Vec<Value>, DynError> {
         // First get the instruments
         let instruments = self.get_instruments_by_expiry(asset, expiry_date).await?;
-        
+
         let mut tickers = Vec::new();
-        
+
         // Get ticker for each instrument
-        for instrument in instruments.iter().take(10) { // Limit to 10 to avoid rate limiting
+        for instrument in instruments.iter().take(10) {
+            // Limit to 10 to avoid rate limiting
             let url = format!("{}/public/ticker", self.base_url);
             let params = [("instrument_name", &instrument.instrument_name)];
-            
-            let response = self.client
-                .get(&url)
-                .query(&params)
-                .send()
-                .await?;
-            
+
+            let response = self.client.get(&url).query(&params).send().await?;
+
             if response.status().is_success() {
                 let ticker_response: DeribitResponse = response.json().await?;
                 tickers.push(ticker_response.result);
             }
-            
+
             // Small delay to avoid rate limiting
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         }
-        
+
         Ok(tickers)
     }
 }
 
 /// Main function to download comprehensive Deribit data as a Polars DataFrame
-/// 
+///
 /// # Arguments
 /// * `asset` - The asset symbol (e.g., "BTC", "ETH")
 /// * `expiry_date` - The expiry date in format "YYYY-MM-DD"
-/// 
+///
 /// # Returns
-/// * `Result<DataFrame, Box<dyn Error>>` - DataFrame with comprehensive trading data
-/// 
+/// * `Result<DataFrame, DynError>` - DataFrame with comprehensive trading data
+///
 /// # Example
 /// ```
 /// let df = download_deribit_data("BTC", "2024-03-29").await?;
 /// ```
-pub async fn download_deribit_data(
-    asset: &str,
-    expiry_date: &str,
-) -> Result<DataFrame, Box<dyn Error>> {
+pub async fn download_deribit_data(asset: &str, expiry_date: &str) -> Result<DataFrame, DynError> {
     let client = DeribitClient::new();
-    
+
     // Get instruments for the expiry date
     let instruments = client.get_instruments_by_expiry(asset, expiry_date).await?;
-    
+
     if instruments.is_empty() {
-        println!("No instruments found for {} expiring on {}", asset, expiry_date);
+        println!(
+            "No instruments found for {} expiring on {}",
+            asset, expiry_date
+        );
         // Return empty DataFrame with correct schema
         return Ok(create_empty_dataframe());
     }
-    
-    println!("Found {} instruments, fetching comprehensive data...", instruments.len());
-    
+
+    println!(
+        "Found {} instruments, fetching comprehensive data...",
+        instruments.len()
+    );
+
     // First, get all open interest data for the currency (more efficient than individual calls)
     println!("📊 Fetching open interest data for {}...", asset);
-    let open_interests = client.get_all_open_interests(asset).await
+    let open_interests = client
+        .get_all_open_interests(asset)
+        .await
         .unwrap_or_else(|e| {
             println!("⚠️ Warning: Could not fetch open interest data: {}", e);
             FxHashMap::default()
         });
-    
-    println!("✅ Found open interest data for {} instruments", open_interests.len());
-    
+
+    println!(
+        "✅ Found open interest data for {} instruments",
+        open_interests.len()
+    );
+
     // Check for negative open interest in our specific instruments
-    let our_negative_oi: Vec<_> = instruments.iter()
+    let our_negative_oi: Vec<_> = instruments
+        .iter()
         .filter_map(|inst| {
-            open_interests.get(&inst.instrument_name)
+            open_interests
+                .get(&inst.instrument_name)
                 .filter(|&&oi| oi < 0.0)
                 .map(|&oi| (&inst.instrument_name, oi))
         })
         .collect();
-    
+
     if !our_negative_oi.is_empty() {
-        println!("⚠️  Found {} instruments with negative open interest:", our_negative_oi.len());
+        println!(
+            "⚠️  Found {} instruments with negative open interest:",
+            our_negative_oi.len()
+        );
         for (name, oi) in &our_negative_oi {
             println!("    {}: {}", name, oi);
         }
     }
-    
+
     let mut all_data: Vec<(
-        String,     // instrument_name
-        String,     // currency
-        String,     // expiry_token
-        String,     // expiry_iso
-        i64,        // timestamp_ms
-        String,     // timestamp_utc
-        String,     // direction
-        f64,        // price
-        f64,        // amount
-        Option<f64>, // iv
-        Option<f64>, // index_price
-        Option<f64>, // mark_price
-        String,     // trade_id
-        i64,        // trade_seq
+        String,         // instrument_name
+        String,         // currency
+        String,         // expiry_token
+        String,         // expiry_iso
+        i64,            // timestamp_ms
+        String,         // timestamp_utc
+        String,         // direction
+        f64,            // price
+        f64,            // amount
+        Option<f64>,    // iv
+        Option<f64>,    // index_price
+        Option<f64>,    // mark_price
+        String,         // trade_id
+        i64,            // trade_seq
         Option<String>, // block_trade_id
         Option<String>, // liquidity
-        Option<i32>, // tick_direction
-        Option<f64>, // strike
+        Option<i32>,    // tick_direction
+        Option<f64>,    // strike
         Option<String>, // option_type
-        Option<f64>, // open_interest
+        Option<f64>,    // open_interest
     )> = Vec::new();
-    
+
     // Fetch trade data for each instrument (limit to avoid rate limits)
     for instrument in instruments.iter().take(5) {
         println!("Fetching trades for: {}", instrument.instrument_name);
-        
+
         // Get the open interest for this specific instrument
         let instrument_open_interest = open_interests.get(&instrument.instrument_name).copied();
-        
+
         // Get recent trades
-        match client.get_trades(&instrument.instrument_name, None, None).await {
+        match client
+            .get_trades(&instrument.instrument_name, None, None)
+            .await
+        {
             Ok(trades) => {
                 println!("  Found {} trades", trades.len());
-                
+
                 // Get current order book for additional data
-                let order_book = client.get_order_book(&instrument.instrument_name).await.ok();
-                
+                let order_book = client
+                    .get_order_book(&instrument.instrument_name)
+                    .await
+                    .ok();
+
                 for trade in trades {
                     // Parse expiry date for token and ISO format
-                    let expiry_dt = DateTime::from_timestamp(instrument.expiration_timestamp / 1000, 0)
-                        .unwrap_or_default();
+                    let expiry_dt =
+                        DateTime::from_timestamp(instrument.expiration_timestamp / 1000, 0)
+                            .unwrap_or_default();
                     let expiry_token = expiry_dt.format("%d%b%y").to_string().to_uppercase();
                     let expiry_iso = expiry_dt.format("%Y-%m-%d").to_string();
-                    
+
                     // Parse timestamp
-                    let timestamp_dt = DateTime::from_timestamp(trade.timestamp / 1000, 0)
-                        .unwrap_or_default();
+                    let timestamp_dt =
+                        DateTime::from_timestamp(trade.timestamp / 1000, 0).unwrap_or_default();
                     let timestamp_utc = timestamp_dt.format("%Y-%m-%d %H:%M:%S UTC").to_string();
-                    
+
                     all_data.push((
                         trade.instrument_name.clone(),
                         instrument.quote_currency.clone(),
@@ -512,7 +548,9 @@ pub async fn download_deribit_data(
                         trade.amount,
                         trade.iv,
                         trade.index_price,
-                        trade.mark_price.or(order_book.as_ref().map(|ob| ob.mark_price)),
+                        trade
+                            .mark_price
+                            .or(order_book.as_ref().map(|ob| ob.mark_price)),
                         trade.trade_id,
                         trade.trade_seq,
                         trade.block_trade_id,
@@ -529,20 +567,24 @@ pub async fn download_deribit_data(
                 continue;
             }
         }
-        
+
         // Small delay to avoid rate limiting
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     }
-    
+
     if all_data.is_empty() {
         println!("No trade data found");
         return Ok(create_empty_dataframe());
     }
-    
+
     // Convert to Polars DataFrame
     let df = create_dataframe_from_data(all_data)?;
-    
-    println!("Created DataFrame with {} rows and {} columns", df.height(), df.width());
+
+    println!(
+        "Created DataFrame with {} rows and {} columns",
+        df.height(),
+        df.width()
+    );
     Ok(df)
 }
 
@@ -568,14 +610,34 @@ fn create_empty_dataframe() -> DataFrame {
         "strike" => Vec::<Option<f64>>::new(),
         "option_type" => Vec::<Option<String>>::new(),
         "open_interest" => Vec::<Option<f64>>::new(),
-    ].unwrap()
+    ]
+    .unwrap()
 }
 
 fn create_dataframe_from_data(
-    data: Vec<(String, String, String, String, i64, String, String, f64, f64, 
-              Option<f64>, Option<f64>, Option<f64>, String, i64, Option<String>, 
-              Option<String>, Option<i32>, Option<f64>, Option<String>, Option<f64>)>
-) -> Result<DataFrame, Box<dyn Error>> {
+    data: Vec<(
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+        String,
+        f64,
+        f64,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        String,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<i32>,
+        Option<f64>,
+        Option<String>,
+        Option<f64>,
+    )>,
+) -> Result<DataFrame, DynError> {
     let mut instrument_names = Vec::new();
     let mut currencies = Vec::new();
     let mut expiry_tokens = Vec::new();
@@ -596,11 +658,30 @@ fn create_dataframe_from_data(
     let mut strikes = Vec::new();
     let mut option_types = Vec::new();
     let mut open_interests = Vec::new();
-    
-    for (instrument_name, currency, expiry_token, expiry_iso, timestamp_ms, timestamp_utc,
-         direction, price, amount, iv, index_price, mark_price, trade_id, trade_seq,
-         block_trade_id, liquidity, tick_direction, strike, option_type, open_interest) in data {
-        
+
+    for (
+        instrument_name,
+        currency,
+        expiry_token,
+        expiry_iso,
+        timestamp_ms,
+        timestamp_utc,
+        direction,
+        price,
+        amount,
+        iv,
+        index_price,
+        mark_price,
+        trade_id,
+        trade_seq,
+        block_trade_id,
+        liquidity,
+        tick_direction,
+        strike,
+        option_type,
+        open_interest,
+    ) in data
+    {
         instrument_names.push(instrument_name);
         currencies.push(currency);
         expiry_tokens.push(expiry_token);
@@ -622,7 +703,7 @@ fn create_dataframe_from_data(
         option_types.push(option_type);
         open_interests.push(open_interest);
     }
-    
+
     let df = df! [
         "instrument_name" => instrument_names,
         "currency" => currencies,
@@ -645,16 +726,16 @@ fn create_dataframe_from_data(
         "option_type" => option_types,
         "open_interest" => open_interests,
     ]?;
-    
+
     Ok(df)
 }
 
 /// Legacy function for compatibility - downloads instruments only
-/// 
+///
 /// # Arguments
 /// * `asset` - The asset symbol (e.g., "BTC", "ETH")
 /// * `expiry_date` - The expiry date in format "YYYY-MM-DD"
-/// 
+///
 /// # Example
 /// ```
 /// let data = download_deribit_instruments("BTC", "2024-03-29").await?;
@@ -662,9 +743,14 @@ fn create_dataframe_from_data(
 pub async fn download_deribit_instruments(
     asset: &str,
     expiry_date: &str,
-) -> Result<Vec<Instrument>, Box<dyn Error>> {
+) -> Result<Vec<Instrument>, DynError> {
     let client = DeribitClient::new();
     client.get_instruments_by_expiry(asset, expiry_date).await
+}
+
+pub async fn fetch_available_expiries(asset: &str) -> Result<Vec<String>, DynError> {
+    let client = DeribitClient::new();
+    client.get_available_expiry_dates(asset).await
 }
 
 #[cfg(test)]
@@ -675,7 +761,7 @@ mod tests {
     async fn test_download_btc_options() {
         let result = download_deribit_data("BTC", "2024-03-29").await;
         assert!(result.is_ok() || result.is_err()); // This will pass either way
-        
+
         if let Ok(df) = result {
             println!("Found DataFrame with {} rows", df.height());
             if df.height() > 0 {
@@ -689,7 +775,7 @@ mod tests {
         let client = DeribitClient::new();
         // This might fail if the instrument doesn't exist anymore
         let result = client.get_order_book("BTC-29MAR24-50000-C").await;
-        
+
         if let Ok(order_book) = result {
             println!("Order book for {}", order_book.instrument_name);
             println!("Best bid: {:?}", order_book.best_bid_price);
