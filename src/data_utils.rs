@@ -40,7 +40,7 @@ struct DeribitResponse {
     id: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Instrument {
     pub instrument_name: String,
     pub kind: String,
@@ -128,7 +128,8 @@ impl DeribitClient {
     ) -> Result<Vec<Instrument>, Box<dyn Error>> {
         // Parse the date to validate format and convert to Deribit format
         let date = NaiveDate::parse_from_str(expiry_date, "%Y-%m-%d")?;
-        let deribit_expiry = date.format("%d%b%y").to_string().to_uppercase();
+        // Use %-d for single-digit days (no zero padding) to match Deribit format
+        let deribit_expiry = date.format("%-d%b%y").to_string().to_uppercase();
         
         // Get all instruments for the currency
         let url = format!("{}/public/get_instruments", self.base_url);
@@ -154,8 +155,9 @@ impl DeribitClient {
         
         // Filter instruments by expiry date
         let filtered_instruments: Vec<Instrument> = instruments
-            .into_iter()
+            .iter()
             .filter(|inst| inst.instrument_name.contains(&deribit_expiry))
+            .cloned()
             .collect();
 
         Ok(filtered_instruments)
@@ -471,6 +473,7 @@ pub async fn download_deribit_data(
         Option<f64>, // strike
         Option<String>, // option_type
         Option<f64>, // open_interest
+        Option<f64>, // interest_rate
     )> = Vec::new();
     
     // Fetch trade data for each instrument (limit to avoid rate limits)
@@ -521,6 +524,7 @@ pub async fn download_deribit_data(
                         instrument.strike,
                         instrument.option_type.clone(),
                         instrument_open_interest, // Now using actual open interest data!
+                        order_book.as_ref().map(|ob| ob.interest_rate), // Add interest rate from order book
                     ));
                 }
             }
@@ -568,13 +572,14 @@ fn create_empty_dataframe() -> DataFrame {
         "strike" => Vec::<Option<f64>>::new(),
         "option_type" => Vec::<Option<String>>::new(),
         "open_interest" => Vec::<Option<f64>>::new(),
+        "interest_rate" => Vec::<Option<f64>>::new(),
     ].unwrap()
 }
 
 fn create_dataframe_from_data(
     data: Vec<(String, String, String, String, i64, String, String, f64, f64, 
               Option<f64>, Option<f64>, Option<f64>, String, i64, Option<String>, 
-              Option<String>, Option<i32>, Option<f64>, Option<String>, Option<f64>)>
+              Option<String>, Option<i32>, Option<f64>, Option<String>, Option<f64>, Option<f64>)>
 ) -> Result<DataFrame, Box<dyn Error>> {
     let mut instrument_names = Vec::new();
     let mut currencies = Vec::new();
@@ -596,10 +601,11 @@ fn create_dataframe_from_data(
     let mut strikes = Vec::new();
     let mut option_types = Vec::new();
     let mut open_interests = Vec::new();
+    let mut interest_rates = Vec::new();
     
     for (instrument_name, currency, expiry_token, expiry_iso, timestamp_ms, timestamp_utc,
          direction, price, amount, iv, index_price, mark_price, trade_id, trade_seq,
-         block_trade_id, liquidity, tick_direction, strike, option_type, open_interest) in data {
+         block_trade_id, liquidity, tick_direction, strike, option_type, open_interest, interest_rate) in data {
         
         instrument_names.push(instrument_name);
         currencies.push(currency);
@@ -621,6 +627,7 @@ fn create_dataframe_from_data(
         strikes.push(strike);
         option_types.push(option_type);
         open_interests.push(open_interest);
+        interest_rates.push(interest_rate);
     }
     
     let df = df! [
@@ -644,6 +651,7 @@ fn create_dataframe_from_data(
         "strike" => strikes,
         "option_type" => option_types,
         "open_interest" => open_interests,
+        "interest_rate" => interest_rates,
     ]?;
     
     Ok(df)
@@ -696,4 +704,77 @@ mod tests {
             println!("Best ask: {:?}", order_book.best_ask_price);
         }
     }
+}
+
+/// Fetch all available expiry dates for a given asset
+/// 
+/// # Arguments
+/// * `asset` - The asset symbol (e.g., "BTC", "ETH")
+/// 
+/// # Returns
+/// A vector of expiry dates in "YYYY-MM-DD" format
+/// 
+/// # Example
+/// ```
+/// let expiries = fetch_available_expiries("BTC").await?;
+/// ```
+pub async fn fetch_available_expiries(asset: &str) -> Result<Vec<String>, Box<dyn Error>> {
+    let client = DeribitClient::new();
+    
+    // Get all instruments for the asset
+    let url = format!("{}/public/get_instruments", client.base_url);
+    let params = [
+        ("currency", asset.to_uppercase()),
+        ("kind", "option".to_string()),
+        ("expired", "false".to_string()),
+    ];
+
+    let response = client.client
+        .get(&url)
+        .query(&params)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(format!("API request failed with status: {}", response.status()).into());
+    }
+
+    let deribit_response: DeribitResponse = response.json().await?;
+    
+    // Parse instruments from the result
+    let instruments: Vec<Instrument> = serde_json::from_value(deribit_response.result)?;
+    
+    // Extract unique expiry dates from instrument names
+    let mut expiry_dates = std::collections::HashSet::new();
+    
+    for instrument in instruments {
+        if let Some(expiry_str) = extract_expiry_from_instrument(&instrument.instrument_name) {
+            if let Ok(iso_date) = convert_deribit_date_to_iso(&expiry_str) {
+                expiry_dates.insert(iso_date);
+            }
+        }
+    }
+    
+    let mut sorted_expiries: Vec<String> = expiry_dates.into_iter().collect();
+    sorted_expiries.sort();
+    
+    Ok(sorted_expiries)
+}
+
+/// Extract expiry string from instrument name (e.g., "BTC-3JAN25-90000-C" -> "3JAN25")
+fn extract_expiry_from_instrument(instrument_name: &str) -> Option<String> {
+    let parts: Vec<&str> = instrument_name.split('-').collect();
+    if parts.len() >= 2 {
+        Some(parts[1].to_string())
+    } else {
+        None
+    }
+}
+
+/// Convert Deribit expiry format to ISO date (e.g., "1OCT25" -> "2025-10-01")
+fn convert_deribit_date_to_iso(deribit_date: &str) -> Result<String, Box<dyn Error>> {
+    // Parse date like "1OCT25" -> "2025-10-01"
+    // Note: Deribit uses single digit days (1OCT25, not 01OCT25)
+    let date = NaiveDate::parse_from_str(deribit_date, "%d%b%y")?;
+    Ok(date.format("%Y-%m-%d").to_string())
 }
