@@ -1,17 +1,15 @@
 use axum::{
     extract::{Query, State},
     response::{Html, Json},
-    routing::get,
+    routing::{get, post},
     Router,
 };
-use tokio::net::TcpListener;
-use serde::{Serialize, Deserialize};
 use polars::prelude::*;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use chrono;
 
-use optionvit::download_deribit_data;
+use optionvit::{download_deribit_data, fetch_available_expiries};
 
 // App state to hold shared data
 #[derive(Clone)]
@@ -105,6 +103,28 @@ struct DataRow {
     interest_rate: Option<f64>,
 }
 
+#[derive(Deserialize)]
+struct LoadRequest {
+    expiry: String,
+}
+
+#[derive(Serialize)]
+struct LoadResponse {
+    expiry: String,
+    rows: usize,
+}
+
+#[derive(Serialize)]
+struct ErrorResponse {
+    error: String,
+}
+
+#[derive(Serialize)]
+struct ExpiryResponse {
+    available: Vec<String>,
+    current: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // First, fetch available expiry dates
@@ -177,20 +197,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/metadata", get(get_column_metadata))
         .with_state(app_state);
 
-    // Specify where to listen (localhost:3000)
-    let listener = TcpListener::bind("127.0.0.1:3000").await.unwrap();
-    println!("🌐 Server running on http://{}", listener.local_addr().unwrap());
+    let listener = TcpListener::bind("127.0.0.1:3000").await?;
+    println!("🌐 Server running on http://{}", listener.local_addr()?);
     println!("📊 View data at: http://127.0.0.1:3000/data");
 
-    axum::serve(listener, app)
-        .await
-        .unwrap();
-
+    axum::serve(listener, app).await?;
     Ok(())
 }
 
+async fn load_expiry_into_state(
+    state: &AppState,
+    expiry: &str,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let asset = state.asset.as_str();
+
+    println!(
+        "📊 Downloading comprehensive {} options data for {}...",
+        asset, expiry
+    );
+    let df = download_deribit_data(asset, expiry).await?;
+    let rows = df.height();
+
+    {
+        let mut data_guard = state.data.write().await;
+        *data_guard = Some(df);
+    }
+
+    {
+        let mut current_guard = state.current_expiry.write().await;
+        *current_guard = Some(expiry.to_string());
+    }
+
+    if let Ok(updated_expiries) = fetch_available_expiries(asset).await {
+        let mut expiries_guard = state.expiries.write().await;
+        *expiries_guard = updated_expiries;
+    }
+
+    println!("✅ Loaded dataset for {} ({} rows)", expiry, rows);
+    Ok(rows)
+}
+
 async fn data_table_page() -> Html<&'static str> {
-    Html(r#"
+    Html(
+        r#"
 <!DOCTYPE html>
 <html>
 <head>
@@ -367,6 +416,19 @@ async fn data_table_page() -> Html<&'static str> {
                 flex-wrap: wrap;
             }
         }
+        @media (max-width: 768px) {
+            .controls {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            .stats {
+                flex-direction: column;
+                gap: 12px;
+            }
+            .stat-box {
+                margin: 0;
+            }
+        }
     </style>
 </head>
 <body>
@@ -517,7 +579,6 @@ async fn data_table_page() -> Html<&'static str> {
     <script>
         let allData = [];
         let filteredData = [];
-        
         // Load initial data
         async function loadData() {
             try {
@@ -611,9 +672,18 @@ async fn data_table_page() -> Html<&'static str> {
         function renderTable(data) {
             console.log('Rendering table with', data.length, 'rows');
             const tbody = document.getElementById('tableBody');
+
+            headerRow.innerHTML = '';
             tbody.innerHTML = '';
-            
-            data.forEach((row, index) => {
+
+            const headers = Object.keys(data[0] || {});
+            headers.forEach(header => {
+                const th = document.createElement('th');
+                th.textContent = header.replace(/_/g, ' ').toUpperCase();
+                headerRow.appendChild(th);
+            });
+
+            data.forEach(row => {
                 const tr = document.createElement('tr');
                 tr.innerHTML = 
                     '<td>' + (row.timestamp ? new Date(row.timestamp * 1000).toLocaleString() : '-') + '</td>' +
@@ -706,7 +776,8 @@ async fn data_table_page() -> Html<&'static str> {
     </script>
 </body>
 </html>
-    "#)
+    "#,
+    )
 }
 
 async fn data_api_filtered(Query(params): Query<FilterParams>, State(app_state): State<AppState>) -> Json<Vec<DataRow>> {
@@ -922,7 +993,7 @@ async fn data_api_filtered(Query(params): Query<FilterParams>, State(app_state):
         };
         rows.push(row);
     }
-    
+
     Json(rows)
 }
 
