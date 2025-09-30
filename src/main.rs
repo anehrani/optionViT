@@ -403,6 +403,11 @@ async fn data_table_page() -> Html<&'static str> {
                         <input type="number" class="filter-input" id="iv_min" placeholder="Min %" step="0.01">
                         <input type="number" class="filter-input" id="iv_max" placeholder="Max %" step="0.01">
                     </div>
+                    <div class="filter-row">
+                        <label>Open Interest:</label>
+                        <input type="number" class="filter-input" id="open_interest_min" placeholder="Min">
+                        <input type="number" class="filter-input" id="open_interest_max" placeholder="Max">
+                    </div>
                 </div>
                 
                 <!-- Categorical Filters -->
@@ -545,7 +550,7 @@ async fn data_table_page() -> Html<&'static str> {
             const params = new URLSearchParams();
             
             // Numeric filters
-            const numericFilters = ['price', 'strike', 'amount', 'iv'];
+            const numericFilters = ['price', 'strike', 'amount', 'iv', 'open_interest'];
             numericFilters.forEach(filter => {
                 const min = document.getElementById(filter + '_min').value;
                 const max = document.getElementById(filter + '_max').value;
