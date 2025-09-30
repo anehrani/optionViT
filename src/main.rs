@@ -1,39 +1,81 @@
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
     response::{Html, Json},
     routing::{get, post},
     Router,
 };
 use polars::prelude::*;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::{net::TcpListener, sync::RwLock};
+use tokio::sync::Mutex;
+use chrono;
 
 use optionvit::{download_deribit_data, fetch_available_expiries};
 
-const DEFAULT_ASSET: &str = "BTC";
-
+// App state to hold shared data
 #[derive(Clone)]
 struct AppState {
-    asset: String,
-    data: Arc<RwLock<Option<DataFrame>>>,
-    current_expiry: Arc<RwLock<Option<String>>>,
-    expiries: Arc<RwLock<Vec<String>>>,
+    data: Arc<Mutex<DataFrame>>,
 }
 
-#[allow(dead_code)]
-fn _assert_state_bounds()
-where
-    AppState: Clone + Send + Sync + 'static,
-{
-}
+// Global storage for the DataFrame
+static mut GLOBAL_DF: Option<Arc<Mutex<DataFrame>>> = None;
 
 #[derive(Deserialize)]
 struct FilterParams {
+    // Numeric filters with comparison operators
+    strike_min: Option<f64>,
+    strike_max: Option<f64>,
+    price_min: Option<f64>,
+    price_max: Option<f64>,
+    amount_min: Option<f64>,
+    amount_max: Option<f64>,
+    iv_min: Option<f64>,
+    iv_max: Option<f64>,
+    index_price_min: Option<f64>,
+    index_price_max: Option<f64>,
+    mark_price_min: Option<f64>,
+    mark_price_max: Option<f64>,
+    trade_seq_min: Option<i64>,
+    trade_seq_max: Option<i64>,
+    tick_direction_min: Option<i32>,
+    tick_direction_max: Option<i32>,
+    open_interest_min: Option<f64>,
+    open_interest_max: Option<f64>,
+    
+    // Date filters
+    timestamp_from: Option<String>, // ISO 8601 format
+    timestamp_to: Option<String>,   // ISO 8601 format
+    
+    // Categorical filters (comma-separated values)
+    instrument_names: Option<String>,
+    currencies: Option<String>,
+    expiry_tokens: Option<String>,
+    expiry_dates: Option<String>,
+    directions: Option<String>,
+    option_types: Option<String>,
+    liquidities: Option<String>,
+    
+    // Legacy filters for backward compatibility
     strike: Option<f64>,
     expiry_date: Option<String>,
     option_type: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ColumnMetadata {
+    name: String,
+    data_type: String,
+    unique_values: Option<Vec<String>>, // For categorical columns
+    min_value: Option<f64>,             // For numeric columns
+    max_value: Option<f64>,             // For numeric columns
+    min_date: Option<String>,           // For date columns
+    max_date: Option<String>,           // For date columns
+}
+
+#[derive(Serialize)]
+struct MetadataResponse {
+    columns: Vec<ColumnMetadata>,
+    available_expiries: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -58,6 +100,7 @@ struct DataRow {
     strike: Option<f64>,
     option_type: Option<String>,
     open_interest: Option<f64>,
+    interest_rate: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -84,54 +127,75 @@ struct ExpiryResponse {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    _assert_state_bounds();
-
-    let state = AppState {
-        asset: DEFAULT_ASSET.to_string(),
-        data: Arc::new(RwLock::new(None)),
-        current_expiry: Arc::new(RwLock::new(None)),
-        expiries: Arc::new(RwLock::new(Vec::new())),
+    // First, fetch available expiry dates
+    println!("🔍 Fetching available BTC option expiry dates...");
+    
+    use optionvit::fetch_available_expiries;
+    let available_expiries = fetch_available_expiries("BTC").await?;
+    
+    if available_expiries.is_empty() {
+        println!("❌ No BTC option expiry dates found!");
+        return Ok(());
+    }
+    
+    println!("📅 Found {} available expiry dates: {:?}", available_expiries.len(), available_expiries);
+    
+    // Download data for ALL available expiry dates
+    println!("📊 Downloading comprehensive BTC options data for all {} expiry dates...", available_expiries.len());
+    
+    let mut all_dataframes = Vec::new();
+    
+    for (i, expiry_date) in available_expiries.iter().enumerate() {
+        println!("📊 [{}/{}] Downloading data for {}...", i + 1, available_expiries.len(), expiry_date);
+        match download_deribit_data("BTC", expiry_date).await {
+            Ok(df) => {
+                println!("✅ Downloaded {} rows for {}", df.height(), expiry_date);
+                if df.height() > 0 {
+                    all_dataframes.push(df);
+                }
+            }
+            Err(e) => {
+                println!("⚠️ Failed to download data for {}: {}", expiry_date, e);
+            }
+        }
+    }
+    
+    if all_dataframes.is_empty() {
+        println!("❌ No data found for any expiry dates!");
+        return Ok(());
+    }
+    
+    // Combine all dataframes
+    println!("📊 Combining data from {} expiry dates...", all_dataframes.len());
+    let mut combined_df = all_dataframes[0].clone();
+    
+    for df in all_dataframes.iter().skip(1) {
+        combined_df = combined_df.vstack(df)?;
+    }
+    
+    println!("✅ Downloaded data successfully!");
+    println!("📈 Combined DataFrame shape: {} rows × {} columns", combined_df.height(), combined_df.width());
+    
+    // Store the DataFrame globally for web access
+    unsafe {
+        GLOBAL_DF = Some(Arc::new(Mutex::new(combined_df.clone())));
+    }
+    
+    // Create app state
+    let app_state = AppState {
+        data: Arc::new(Mutex::new(combined_df)),
     };
 
-    println!(
-        "🔍 Fetching available expiry dates for {}...",
-        DEFAULT_ASSET
-    );
-    let initial_expiries = match fetch_available_expiries(DEFAULT_ASSET).await {
-        Ok(list) if !list.is_empty() => list,
-        Ok(_) => {
-            println!("⚠️ No upcoming expiries found for {}.", DEFAULT_ASSET);
-            Vec::new()
-        }
-        Err(err) => {
-            eprintln!("⚠️ Could not retrieve expiries: {}", err);
-            Vec::new()
-        }
-    };
-
-    {
-        let mut expiries_guard = state.expiries.write().await;
-        *expiries_guard = initial_expiries.clone();
-    }
-
-    if let Some(default_expiry) = initial_expiries.last().cloned() {
-        if let Err(err) = load_expiry_into_state(&state, &default_expiry).await {
-            eprintln!(
-                "⚠️ Failed to load default expiry {}: {}",
-                default_expiry, err
-            );
-        }
-    } else {
-        println!("⚠️ Start the server and use the refresh control to load data once expiries are available.");
-    }
-
+    // Start web server
+    println!("🚀 Starting web server...");
+    
+    // Define routes
     let app = Router::new()
         .route("/", get(data_table_page))
         .route("/data", get(data_table_page))
         .route("/api/data", get(data_api_filtered))
-        .route("/api/expiries", get(expiries_handler))
-        .route("/api/load", post(load_expiry_handler))
-        .with_state(state.clone());
+        .route("/api/metadata", get(get_column_metadata))
+        .with_state(app_state);
 
     let listener = TcpListener::bind("127.0.0.1:3000").await?;
     println!("🌐 Server running on http://{}", listener.local_addr()?);
@@ -179,125 +243,178 @@ async fn data_table_page() -> Html<&'static str> {
 <!DOCTYPE html>
 <html>
 <head>
-    <title>BTC Options Data - Excel View</title>
+    <title>BTC Options Data - Advanced Filtering</title>
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 20px;
-            background-color: #f5f5f5;
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            margin: 0;
+            padding: 20px;
+            background-color: #f8f9fa;
         }
         .container {
-            max-width: 95%;
+            max-width: 98%;
             margin: 0 auto;
             background-color: white;
-            padding: 20px;
-            border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            overflow: hidden;
         }
-        h1 {
-            color: #333;
-            text-align: center;
-            margin-bottom: 30px;
-        }
-        .info {
-            background-color: #e8f4fd;
-            padding: 15px;
-            border-radius: 5px;
-            margin: 20px 0;
-        }
-        .controls {
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 20px;
-        }
-        .controls label {
-            font-weight: bold;
-        }
-        .controls select, .controls button {
-            padding: 8px 12px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            font-size: 14px;
-        }
-        .controls button {
-            background-color: #4CAF50;
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
-            cursor: pointer;
+            padding: 25px;
+            text-align: center;
         }
-        .controls button:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
+        h1 { 
+            margin: 0;
+            font-size: 28px;
+            font-weight: 300;
         }
-        .status {
-            font-size: 13px;
-            color: #555;
+        
+        /* Filter Panel Styles */
+        .filter-panel {
+            background-color: #f8f9fa;
+            border-bottom: 2px solid #e9ecef;
+            padding: 20px;
         }
-        .status.error {
-            color: #b00020;
+        .filter-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: #495057;
         }
-        .status.success {
-            color: #2e7d32;
+        .filter-sections {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 25px;
         }
-        .table-container {
-            max-height: 600px;
-            overflow-y: auto;
-            border: 1px solid #ddd;
+        .filter-section {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #dee2e6;
         }
-        #dataTable {
-            width: 100%;
-            border-collapse: collapse;
-            margin: 20px 0;
+        .filter-section h3 {
+            margin: 0 0 10px 0;
+            font-size: 14px;
+            font-weight: 600;
+            color: #6c757d;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .filter-row {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+            gap: 8px;
+        }
+        .filter-row label {
+            min-width: 80px;
+            font-size: 12px;
+            color: #6c757d;
+        }
+        .filter-input {
+            flex: 1;
+            padding: 6px 10px;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
             font-size: 12px;
         }
-        #dataTable th, #dataTable td {
-            border: 1px solid #ddd;
-            padding: 8px;
-            text-align: left;
-        }
-        #dataTable th {
-            background-color: #4CAF50;
-            color: white;
-            font-weight: bold;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-        }
-        #dataTable tr:nth-child(even) {
-            background-color: #f2f2f2;
-        }
-        #dataTable tr:hover {
-            background-color: #e8f4fd;
-        }
-        .loading {
+        .filter-buttons {
+            margin-top: 15px;
             text-align: center;
-            padding: 50px;
-            font-size: 18px;
-            color: #666;
         }
-        .stats {
+        .btn {
+            padding: 10px 20px;
+            margin: 0 5px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .btn-secondary {
+            background-color: #6c757d;
+            color: white;
+        }
+        .btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        }
+        
+        /* Stats Panel */
+        .stats-container {
             display: flex;
             justify-content: space-around;
-            margin: 20px 0;
+            padding: 20px;
+            background-color: #ffffff;
+            border-bottom: 1px solid #dee2e6;
         }
         .stat-box {
-            background-color: #f9f9f9;
-            padding: 15px;
-            border-radius: 5px;
             text-align: center;
-            border: 1px solid #ddd;
-            flex: 1 1 200px;
-            margin: 0 10px;
+            padding: 10px;
         }
         .stat-number {
             font-size: 24px;
             font-weight: bold;
-            color: #4CAF50;
+            color: #495057;
         }
         .stat-label {
-            font-size: 14px;
-            color: #666;
+            font-size: 12px;
+            color: #6c757d;
+            margin-top: 5px;
+        }
+        
+        /* Table Styles */
+        .table-container {
+            padding: 20px;
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+        }
+        th, td {
+            padding: 8px 6px;
+            text-align: left;
+            border-bottom: 1px solid #dee2e6;
+            white-space: nowrap;
+        }
+        th {
+            background-color: #f8f9fa;
+            font-weight: 600;
+            color: #495057;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        tr:hover {
+            background-color: #f8f9fa;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+        }
+        
+        /* Responsive design */
+        @media (max-width: 1200px) {
+            .filter-sections {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+        @media (max-width: 768px) {
+            .filter-sections {
+                grid-template-columns: 1fr;
+            }
+            .stats-container {
+                flex-wrap: wrap;
+            }
         }
         @media (max-width: 768px) {
             .controls {
@@ -316,136 +433,244 @@ async fn data_table_page() -> Html<&'static str> {
 </head>
 <body>
     <div class="container">
-        <h1>📊 BTC Options Trading Data</h1>
-
-        <div class="info">
-            <p><strong>Real-time BTC Options Data:</strong></p>
-            <ul>
-                <li>Select an expiry date to load Deribit data</li>
-                <li>Includes trade history, open interest, and market data</li>
-                <li>Sortable and scrollable table view</li>
-            </ul>
+        <div class="header">
+            <h1>🪙 BTC Options Trading Data</h1>
+            <p>Advanced filtering and real-time data analysis</p>
         </div>
-
-        <div class="controls">
-            <label for="expirySelect">Expiry Date:</label>
-            <select id="expirySelect"></select>
-            <button id="refreshButton">Refresh</button>
-            <span id="statusMessage" class="status"></span>
+        
+        <!-- Advanced Filter Panel -->
+        <div class="filter-panel">
+            <div class="filter-title">🔍 Advanced Filters</div>
+            <div class="filter-sections">
+                <!-- Numeric Filters -->
+                <div class="filter-section">
+                    <h3>Numeric Ranges</h3>
+                    <div class="filter-row">
+                        <label>Price:</label>
+                        <input type="number" class="filter-input" id="price_min" placeholder="Min" step="0.0001">
+                        <input type="number" class="filter-input" id="price_max" placeholder="Max" step="0.0001">
+                    </div>
+                    <div class="filter-row">
+                        <label>Strike:</label>
+                        <input type="number" class="filter-input" id="strike_min" placeholder="Min">
+                        <input type="number" class="filter-input" id="strike_max" placeholder="Max">
+                    </div>
+                    <div class="filter-row">
+                        <label>Amount:</label>
+                        <input type="number" class="filter-input" id="amount_min" placeholder="Min">
+                        <input type="number" class="filter-input" id="amount_max" placeholder="Max">
+                    </div>
+                    <div class="filter-row">
+                        <label>IV:</label>
+                        <input type="number" class="filter-input" id="iv_min" placeholder="Min %" step="0.01">
+                        <input type="number" class="filter-input" id="iv_max" placeholder="Max %" step="0.01">
+                    </div>
+                </div>
+                
+                <!-- Categorical Filters -->
+                <div class="filter-section">
+                    <h3>Categories</h3>
+                    <div class="filter-row">
+                        <label>Option Type:</label>
+                        <select class="filter-input" id="option_type">
+                            <option value="">All</option>
+                            <option value="call">Call</option>
+                            <option value="put">Put</option>
+                        </select>
+                    </div>
+                    <div class="filter-row">
+                        <label>Direction:</label>
+                        <select class="filter-input" id="direction">
+                            <option value="">All</option>
+                            <option value="buy">Buy</option>
+                            <option value="sell">Sell</option>
+                        </select>
+                    </div>
+                    <div class="filter-row">
+                        <label>Liquidity:</label>
+                        <select class="filter-input" id="liquidity">
+                            <option value="">All</option>
+                            <option value="M">Maker</option>
+                            <option value="T">Taker</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <!-- Date & Time Filters -->
+                <div class="filter-section">
+                    <h3>Date & Time</h3>
+                    <div class="filter-row">
+                        <label>From:</label>
+                        <input type="datetime-local" class="filter-input" id="timestamp_min">
+                    </div>
+                    <div class="filter-row">
+                        <label>To:</label>
+                        <input type="datetime-local" class="filter-input" id="timestamp_max">
+                    </div>
+                    <div class="filter-row">
+                        <label>Expiry:</label>
+                        <select class="filter-input" id="expiry_date">
+                            <option value="">All Expiries</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="filter-buttons">
+                <button class="btn btn-primary" onclick="applyFilters()">🔍 Apply Filters</button>
+                <button class="btn btn-secondary" onclick="clearFilters()">🔄 Clear All</button>
+                <button class="btn btn-secondary" onclick="refreshData()">📊 Refresh Data</button>
+            </div>
         </div>
-
-        <div class="stats" id="statsContainer"></div>
-
+        
+        <!-- Stats Summary -->
+        <div class="stats-container" id="statsContainer">
+            <div class="stat-box">
+                <div class="stat-number">-</div>
+                <div class="stat-label">Total Trades</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-number">-</div>
+                <div class="stat-label">Instruments</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-number">-</div>
+                <div class="stat-label">Total Volume</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-number">-</div>
+                <div class="stat-label">Avg Price</div>
+            </div>
+        </div>
+        
+        <!-- Data Table -->
         <div class="table-container">
-            <div id="loading" class="loading">📡 Loading data...</div>
-            <table id="dataTable" style="display:none;">
+            <div id="loading" class="loading">Loading BTC options data...</div>
+            <table id="dataTable" style="display: none;">
                 <thead>
-                    <tr id="tableHeader"></tr>
+                    <tr>
+                        <th>Timestamp</th>
+                        <th>Instrument</th>
+                        <th>Price</th>
+                        <th>Amount</th>
+                        <th>Direction</th>
+                        <th>Strike</th>
+                        <th>Type</th>
+                        <th>Expiry</th>
+                        <th>IV (%)</th>
+                        <th>Delta</th>
+                        <th>Gamma</th>
+                        <th>Theta</th>
+                        <th>Vega</th>
+                        <th>Index Price</th>
+                        <th>Mark Price</th>
+                        <th>Trade ID</th>
+                        <th>Liquidity</th>
+                        <th>Open Interest</th>
+                        <th>Interest Rate (%)</th>
+                    </tr>
                 </thead>
-                <tbody id="tableBody"></tbody>
+                <tbody id="tableBody">
+                </tbody>
             </table>
         </div>
     </div>
 
     <script>
         let allData = [];
-
-        const expirySelect = document.getElementById('expirySelect');
-        const refreshButton = document.getElementById('refreshButton');
-        const statusMessage = document.getElementById('statusMessage');
-
-        refreshButton.addEventListener('click', async () => {
-            const selectedExpiry = expirySelect.value;
-            if (!selectedExpiry) {
-                setStatus('Please choose an expiry date first.', 'error');
-                return;
-            }
-
-            refreshButton.disabled = true;
-            setStatus(`Loading data for ${selectedExpiry}...`, '');
-
-            try {
-                const response = await fetch('/api/load', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ expiry: selectedExpiry })
-                });
-
-                const result = await response.json();
-
-                if (!response.ok) {
-                    throw new Error(result.error || 'Failed to load data');
-                }
-
-                setStatus(`Loaded ${result.rows} rows for ${result.expiry}.`, 'success');
-                await loadExpiries();
-                await loadData();
-            } catch (error) {
-                console.error('Error refreshing data:', error);
-                setStatus(`Error: ${error.message}`, 'error');
-            } finally {
-                refreshButton.disabled = false;
-            }
-        });
-
-        function setStatus(message, type) {
-            statusMessage.textContent = message;
-            statusMessage.className = `status ${type}`.trim();
-        }
-
-        async function loadExpiries() {
-            try {
-                const response = await fetch('/api/expiries');
-                const data = await response.json();
-                expirySelect.innerHTML = '';
-
-                data.available.forEach(expiry => {
-                    const option = document.createElement('option');
-                    option.value = expiry;
-                    option.textContent = expiry;
-                    expirySelect.appendChild(option);
-                });
-
-                if (data.current && data.available.includes(data.current)) {
-                    expirySelect.value = data.current;
-                }
-            } catch (error) {
-                console.error('Error loading expiries:', error);
-                setStatus('Error fetching expiry list.', 'error');
-            }
-        }
-
+        let filteredData = [];
+        // Load initial data
         async function loadData() {
             try {
+                console.log('Loading data from /api/data...');
                 const response = await fetch('/api/data');
-                const data = await response.json();
-
-                if (!Array.isArray(data) || data.length === 0) {
-                    allData = [];
-                    document.getElementById('dataTable').style.display = 'none';
-                    document.getElementById('loading').style.display = 'block';
-                    document.getElementById('loading').textContent = '📊 No data available for the selected expiry.';
-                    document.getElementById('statsContainer').innerHTML = '';
-                    return;
+                if (!response.ok) {
+                    throw new Error('Network response was not ok: ' + response.status);
                 }
-
-                allData = data;
-                buildTable(data);
-                showStats(data);
-
+                allData = await response.json();
+                console.log('Loaded data:', allData.length, 'rows');
+                filteredData = [...allData];
+                renderTable(filteredData);
+                updateStats(filteredData);
                 document.getElementById('loading').style.display = 'none';
                 document.getElementById('dataTable').style.display = 'table';
             } catch (error) {
                 console.error('Error loading data:', error);
-                document.getElementById('loading').style.display = 'block';
-                document.getElementById('loading').innerHTML = '❌ Error loading data: ' + error.message;
-                document.getElementById('dataTable').style.display = 'none';
-                setStatus('Error loading dataset.', 'error');
+                document.getElementById('loading').innerHTML = 'Error loading data: ' + error.message + '. Please try refreshing.';
             }
         }
-
-        function buildTable(data) {
-            const headerRow = document.getElementById('tableHeader');
+        
+        // Apply filters
+        async function applyFilters() {
+            console.log('Applying filters...');
+            const params = new URLSearchParams();
+            
+            // Numeric filters
+            const numericFilters = ['price', 'strike', 'amount', 'iv'];
+            numericFilters.forEach(filter => {
+                const min = document.getElementById(filter + '_min').value;
+                const max = document.getElementById(filter + '_max').value;
+                if (min) params.append(filter + '_min', min);
+                if (max) params.append(filter + '_max', max);
+            });
+            
+            // Categorical filters (need to map frontend field names to backend parameter names)
+            const categoricalFilters = [
+                { frontend: 'option_type', backend: 'option_types' },
+                { frontend: 'direction', backend: 'directions' },
+                { frontend: 'liquidity', backend: 'liquidities' },
+                { frontend: 'expiry_date', backend: 'expiry_dates' }
+            ];
+            categoricalFilters.forEach(filter => {
+                const value = document.getElementById(filter.frontend).value;
+                if (value) params.append(filter.backend, value);
+            });
+            
+            // Date filters
+            const timestampMin = document.getElementById('timestamp_min').value;
+            const timestampMax = document.getElementById('timestamp_max').value;
+            if (timestampMin) params.append('timestamp_min', new Date(timestampMin).toISOString());
+            if (timestampMax) params.append('timestamp_max', new Date(timestampMax).toISOString());
+            
+            try {
+                const url = '/api/data?' + params.toString();
+                console.log('Fetching filtered data from:', url);
+                const response = await fetch(url);
+                if (!response.ok) {
+                    throw new Error('Network response was not ok: ' + response.status);
+                }
+                filteredData = await response.json();
+                console.log('Filtered data:', filteredData.length, 'rows');
+                renderTable(filteredData);
+                updateStats(filteredData);
+            } catch (error) {
+                console.error('Error applying filters:', error);
+                alert('Error applying filters: ' + error.message);
+            }
+        }
+        
+        // Clear all filters
+        function clearFilters() {
+            console.log('Clearing filters...');
+            document.querySelectorAll('.filter-input').forEach(input => {
+                input.value = '';
+            });
+            filteredData = [...allData];
+            renderTable(filteredData);
+            updateStats(filteredData);
+        }
+        
+        // Refresh data from server
+        function refreshData() {
+            console.log('Refreshing data...');
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('dataTable').style.display = 'none';
+            loadData();
+        }
+        
+        // Render table
+        function renderTable(data) {
+            console.log('Rendering table with', data.length, 'rows');
             const tbody = document.getElementById('tableBody');
 
             headerRow.innerHTML = '';
@@ -460,56 +685,94 @@ async fn data_table_page() -> Html<&'static str> {
 
             data.forEach(row => {
                 const tr = document.createElement('tr');
-                headers.forEach(header => {
-                    const td = document.createElement('td');
-                    const value = row[header];
-
-                    if (typeof value === 'number') {
-                        td.textContent = Number.isInteger(value)
-                            ? value.toLocaleString()
-                            : value.toLocaleString(undefined, { maximumFractionDigits: 6 });
-                        td.style.textAlign = 'right';
-                    } else {
-                        td.textContent = value ?? 'N/A';
-                    }
-
-                    tr.appendChild(td);
-                });
+                tr.innerHTML = 
+                    '<td>' + (row.timestamp ? new Date(row.timestamp * 1000).toLocaleString() : '-') + '</td>' +
+                    '<td>' + (row.instrument_name || '-') + '</td>' +
+                    '<td>$' + ((row.price || 0).toFixed(6)) + '</td>' +
+                    '<td>' + (row.amount || '-') + '</td>' +
+                    '<td>' + (row.direction || '-') + '</td>' +
+                    '<td>' + (row.strike || '-') + '</td>' +
+                    '<td>' + (row.option_type || '-') + '</td>' +
+                    '<td>' + (row.expiry_iso || '-') + '</td>' +
+                    '<td>' + (row.iv ? (row.iv * 100).toFixed(2) : '-') + '</td>' +
+                    '<td>' + (row.delta ? row.delta.toFixed(4) : '-') + '</td>' +
+                    '<td>' + (row.gamma ? row.gamma.toFixed(6) : '-') + '</td>' +
+                    '<td>' + (row.theta ? row.theta.toFixed(6) : '-') + '</td>' +
+                    '<td>' + (row.vega ? row.vega.toFixed(6) : '-') + '</td>' +
+                    '<td>$' + (row.index_price ? row.index_price.toFixed(2) : '-') + '</td>' +
+                    '<td>$' + (row.mark_price ? row.mark_price.toFixed(6) : '-') + '</td>' +
+                    '<td>' + (row.trade_id || '-') + '</td>' +
+                    '<td>' + (row.liquidity || '-') + '</td>' +
+                    '<td>' + (row.open_interest || '-') + '</td>' +
+                    '<td>' + (row.interest_rate ? (row.interest_rate * 100).toFixed(4) + '%' : '-') + '</td>';
                 tbody.appendChild(tr);
             });
         }
-
-        function showStats(data) {
+        
+        // Update statistics
+        function updateStats(data) {
+            console.log('Updating stats for', data.length, 'rows');
             const statsContainer = document.getElementById('statsContainer');
             const totalRows = data.length;
             const uniqueInstruments = new Set(data.map(row => row.instrument_name)).size;
             const totalVolume = data.reduce((sum, row) => sum + (row.amount || 0), 0);
-            const avgPrice = data.reduce((sum, row) => sum + (row.price || 0), 0) / totalRows;
-
-            statsContainer.innerHTML = `
-                <div class="stat-box">
-                    <div class="stat-number">${totalRows}</div>
-                    <div class="stat-label">Total Trades</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-number">${uniqueInstruments}</div>
-                    <div class="stat-label">Instruments</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-number">${totalVolume.toFixed(2)}</div>
-                    <div class="stat-label">Total Volume</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-number">$${avgPrice.toFixed(6)}</div>
-                    <div class="stat-label">Avg Price</div>
-                </div>
-            `;
+            const avgPrice = totalRows > 0 ? data.reduce((sum, row) => sum + (row.price || 0), 0) / totalRows : 0;
+            
+            statsContainer.innerHTML = 
+                '<div class="stat-box">' +
+                    '<div class="stat-number">' + totalRows + '</div>' +
+                    '<div class="stat-label">Total Trades</div>' +
+                '</div>' +
+                '<div class="stat-box">' +
+                    '<div class="stat-number">' + uniqueInstruments + '</div>' +
+                    '<div class="stat-label">Instruments</div>' +
+                '</div>' +
+                '<div class="stat-box">' +
+                    '<div class="stat-number">' + totalVolume.toFixed(1) + '</div>' +
+                    '<div class="stat-label">Total Volume</div>' +
+                '</div>' +
+                '<div class="stat-box">' +
+                    '<div class="stat-number">$' + avgPrice.toFixed(6) + '</div>' +
+                    '<div class="stat-label">Avg Price</div>' +
+                '</div>';
         }
-
-        (async function initPage() {
-            await loadExpiries();
-            await loadData();
-        })();
+        
+        // Load metadata (expiry dates and other info)
+        async function loadMetadata() {
+            try {
+                console.log('Loading metadata...');
+                const response = await fetch('/api/metadata');
+                if (!response.ok) {
+                    throw new Error('Network response was not ok: ' + response.status);
+                }
+                const metadata = await response.json();
+                console.log('Loaded metadata:', metadata);
+                
+                // Populate expiry dates dropdown
+                const expirySelect = document.getElementById('expiry_date');
+                if (metadata.available_expiries && metadata.available_expiries.length > 0) {
+                    metadata.available_expiries.forEach(expiry => {
+                        const option = document.createElement('option');
+                        option.value = expiry;
+                        option.textContent = expiry;
+                        expirySelect.appendChild(option);
+                    });
+                }
+                
+                // You can also populate other metadata-driven elements here
+                console.log('Metadata loaded successfully');
+            } catch (error) {
+                console.error('Error loading metadata:', error);
+                // Don't fail completely if metadata fails to load
+            }
+        }
+        
+        // Load data when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('Page loaded, starting data fetch...');
+            loadMetadata(); // Load expiry dates first
+            loadData();     // Then load the actual data
+        });
     </script>
 </body>
 </html>
@@ -517,174 +780,216 @@ async fn data_table_page() -> Html<&'static str> {
     )
 }
 
-async fn data_api_filtered(
-    State(state): State<AppState>,
-    Query(params): Query<FilterParams>,
-) -> Json<Vec<DataRow>> {
-    let data_handle = state.data.clone();
-    let data_guard = data_handle.read().await;
-    let df = match data_guard.as_ref() {
-        Some(df) => df.clone(),
-        None => return Json(vec![]),
-    };
-    drop(data_guard);
-
+async fn data_api_filtered(Query(params): Query<FilterParams>, State(app_state): State<AppState>) -> Json<Vec<DataRow>> {
+    let df = app_state.data.lock().await.clone();
+    
+    if df.is_empty() {
+        return Json(vec![]);
+    }
+    
+    // Start with the original dataframe
     let mut lazy_df = df.clone().lazy();
-
+    
+    // Apply numeric range filters
+    if let Some(min_val) = params.strike_min {
+        lazy_df = lazy_df.filter(col("strike").gt_eq(lit(min_val)));
+    }
+    if let Some(max_val) = params.strike_max {
+        lazy_df = lazy_df.filter(col("strike").lt_eq(lit(max_val)));
+    }
+    
+    if let Some(min_val) = params.price_min {
+        lazy_df = lazy_df.filter(col("price").gt_eq(lit(min_val)));
+    }
+    if let Some(max_val) = params.price_max {
+        lazy_df = lazy_df.filter(col("price").lt_eq(lit(max_val)));
+    }
+    
+    if let Some(min_val) = params.amount_min {
+        lazy_df = lazy_df.filter(col("amount").gt_eq(lit(min_val)));
+    }
+    if let Some(max_val) = params.amount_max {
+        lazy_df = lazy_df.filter(col("amount").lt_eq(lit(max_val)));
+    }
+    
+    if let Some(min_val) = params.iv_min {
+        lazy_df = lazy_df.filter(col("iv").gt_eq(lit(min_val)));
+    }
+    if let Some(max_val) = params.iv_max {
+        lazy_df = lazy_df.filter(col("iv").lt_eq(lit(max_val)));
+    }
+    
+    if let Some(min_val) = params.index_price_min {
+        lazy_df = lazy_df.filter(col("index_price").gt_eq(lit(min_val)));
+    }
+    if let Some(max_val) = params.index_price_max {
+        lazy_df = lazy_df.filter(col("index_price").lt_eq(lit(max_val)));
+    }
+    
+    if let Some(min_val) = params.mark_price_min {
+        lazy_df = lazy_df.filter(col("mark_price").gt_eq(lit(min_val)));
+    }
+    if let Some(max_val) = params.mark_price_max {
+        lazy_df = lazy_df.filter(col("mark_price").lt_eq(lit(max_val)));
+    }
+    
+    if let Some(min_val) = params.trade_seq_min {
+        lazy_df = lazy_df.filter(col("trade_seq").gt_eq(lit(min_val)));
+    }
+    if let Some(max_val) = params.trade_seq_max {
+        lazy_df = lazy_df.filter(col("trade_seq").lt_eq(lit(max_val)));
+    }
+    
+    if let Some(min_val) = params.tick_direction_min {
+        lazy_df = lazy_df.filter(col("tick_direction").gt_eq(lit(min_val)));
+    }
+    if let Some(max_val) = params.tick_direction_max {
+        lazy_df = lazy_df.filter(col("tick_direction").lt_eq(lit(max_val)));
+    }
+    
+    if let Some(min_val) = params.open_interest_min {
+        lazy_df = lazy_df.filter(col("open_interest").gt_eq(lit(min_val)));
+    }
+    if let Some(max_val) = params.open_interest_max {
+        lazy_df = lazy_df.filter(col("open_interest").lt_eq(lit(max_val)));
+    }
+    
+    // Apply timestamp range filters
+    if let Some(timestamp_from) = &params.timestamp_from {
+        if let Ok(timestamp_ms) = chrono::DateTime::parse_from_rfc3339(timestamp_from) {
+            let timestamp_ms = timestamp_ms.timestamp_millis();
+            lazy_df = lazy_df.filter(col("timestamp_ms").gt_eq(lit(timestamp_ms)));
+        }
+    }
+    if let Some(timestamp_to) = &params.timestamp_to {
+        if let Ok(timestamp_ms) = chrono::DateTime::parse_from_rfc3339(timestamp_to) {
+            let timestamp_ms = timestamp_ms.timestamp_millis();
+            lazy_df = lazy_df.filter(col("timestamp_ms").lt_eq(lit(timestamp_ms)));
+        }
+    }
+    
+    // Apply categorical filters (comma-separated values)
+    if let Some(instrument_names) = &params.instrument_names {
+        let names: Vec<&str> = instrument_names.split(',').map(|s| s.trim()).collect();
+        if !names.is_empty() {
+            let expr = names.iter().fold(lit(false), |acc, &name| {
+                acc.or(col("instrument_name").eq(lit(name)))
+            });
+            lazy_df = lazy_df.filter(expr);
+        }
+    }
+    
+    if let Some(currencies) = &params.currencies {
+        let values: Vec<&str> = currencies.split(',').map(|s| s.trim()).collect();
+        if !values.is_empty() {
+            let expr = values.iter().fold(lit(false), |acc, &val| {
+                acc.or(col("currency").eq(lit(val)))
+            });
+            lazy_df = lazy_df.filter(expr);
+        }
+    }
+    
+    if let Some(expiry_tokens) = &params.expiry_tokens {
+        let values: Vec<&str> = expiry_tokens.split(',').map(|s| s.trim()).collect();
+        if !values.is_empty() {
+            let expr = values.iter().fold(lit(false), |acc, &val| {
+                acc.or(col("expiry_token").eq(lit(val)))
+            });
+            lazy_df = lazy_df.filter(expr);
+        }
+    }
+    
+    if let Some(expiry_dates) = &params.expiry_dates {
+        let values: Vec<&str> = expiry_dates.split(',').map(|s| s.trim()).collect();
+        if !values.is_empty() {
+            let expr = values.iter().fold(lit(false), |acc, &val| {
+                acc.or(col("expiry_iso").eq(lit(val)))
+            });
+            lazy_df = lazy_df.filter(expr);
+        }
+    }
+    
+    if let Some(directions) = &params.directions {
+        let values: Vec<&str> = directions.split(',').map(|s| s.trim()).collect();
+        if !values.is_empty() {
+            let expr = values.iter().fold(lit(false), |acc, &val| {
+                acc.or(col("direction").eq(lit(val)))
+            });
+            lazy_df = lazy_df.filter(expr);
+        }
+    }
+    
+    if let Some(option_types) = &params.option_types {
+        let values: Vec<&str> = option_types.split(',').map(|s| s.trim()).collect();
+        if !values.is_empty() {
+            let expr = values.iter().fold(lit(false), |acc, &val| {
+                acc.or(col("option_type").eq(lit(val)))
+            });
+            lazy_df = lazy_df.filter(expr);
+        }
+    }
+    
+    if let Some(liquidities) = &params.liquidities {
+        let values: Vec<&str> = liquidities.split(',').map(|s| s.trim()).collect();
+        if !values.is_empty() {
+            let expr = values.iter().fold(lit(false), |acc, &val| {
+                acc.or(col("liquidity").eq(lit(val)))
+            });
+            lazy_df = lazy_df.filter(expr);
+        }
+    }
+    
+    // Legacy filters for backward compatibility
     if let Some(option_type) = &params.option_type {
         lazy_df = lazy_df.filter(col("option_type").eq(lit(option_type.as_str())));
     }
-
-    if let Some(expiry_date) = &params.expiry_date {
-        lazy_df = lazy_df.filter(col("expiry_iso").eq(lit(expiry_date.as_str())));
-    }
-
     if let Some(strike) = params.strike {
         lazy_df = lazy_df.filter(col("strike").eq(lit(strike)));
     }
-
-    let filtered_df = lazy_df.collect().unwrap_or(df.clone());
-
-    if filtered_df.height() == 0 {
-        return Json(vec![]);
+    if let Some(expiry_date) = &params.expiry_date {
+        lazy_df = lazy_df.filter(col("expiry_iso").eq(lit(expiry_date.as_str())));
     }
-
-    let mut rows = Vec::with_capacity(filtered_df.height());
-
+    
+    // Execute the filters
+    let filtered_df = match lazy_df.collect() {
+        Ok(df) => df,
+        Err(_) => df, // If filter fails, return original data
+    };
+    
+    let mut rows = Vec::new();
+    
     for i in 0..filtered_df.height() {
         let row = DataRow {
-            instrument_name: filtered_df
-                .column("instrument_name")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .map(|v| v.to_string().trim_matches('"').to_string())
-                .unwrap_or_default(),
-            currency: filtered_df
-                .column("currency")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .map(|v| v.to_string().trim_matches('"').to_string())
-                .unwrap_or_default(),
-            expiry_token: filtered_df
-                .column("expiry_token")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .map(|v| v.to_string().trim_matches('"').to_string())
-                .unwrap_or_default(),
-            expiry_iso: filtered_df
-                .column("expiry_iso")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .map(|v| v.to_string().trim_matches('"').to_string())
-                .unwrap_or_default(),
-            timestamp_ms: filtered_df
-                .column("timestamp_ms")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .and_then(|v| v.to_string().parse().ok())
-                .unwrap_or_default(),
-            timestamp_utc: filtered_df
-                .column("timestamp_utc")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .map(|v| v.to_string().trim_matches('"').to_string())
-                .unwrap_or_default(),
-            direction: filtered_df
-                .column("direction")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .map(|v| v.to_string().trim_matches('"').to_string())
-                .unwrap_or_default(),
-            price: filtered_df
-                .column("price")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .and_then(|v| v.to_string().parse().ok())
-                .unwrap_or_default(),
-            amount: filtered_df
-                .column("amount")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .and_then(|v| v.to_string().parse().ok())
-                .unwrap_or_default(),
-            iv: filtered_df
-                .column("iv")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .and_then(|v| v.to_string().parse().ok()),
-            index_price: filtered_df
-                .column("index_price")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .and_then(|v| v.to_string().parse().ok()),
-            mark_price: filtered_df
-                .column("mark_price")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .and_then(|v| v.to_string().parse().ok()),
-            trade_id: filtered_df
-                .column("trade_id")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .map(|v| v.to_string().trim_matches('"').to_string())
-                .unwrap_or_default(),
-            trade_seq: filtered_df
-                .column("trade_seq")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .and_then(|v| v.to_string().parse().ok())
-                .unwrap_or_default(),
-            block_trade_id: filtered_df
-                .column("block_trade_id")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .and_then(|v| {
-                    let value = v.to_string();
-                    if value == "null" {
-                        None
-                    } else {
-                        Some(value.trim_matches('"').to_string())
-                    }
-                }),
-            liquidity: filtered_df
-                .column("liquidity")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .and_then(|v| {
-                    let value = v.to_string();
-                    if value == "null" {
-                        None
-                    } else {
-                        Some(value.trim_matches('"').to_string())
-                    }
-                }),
-            tick_direction: filtered_df
-                .column("tick_direction")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .and_then(|v| v.to_string().parse().ok()),
-            strike: filtered_df
-                .column("strike")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .and_then(|v| v.to_string().parse().ok()),
-            option_type: filtered_df
-                .column("option_type")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .and_then(|v| {
-                    let value = v.to_string();
-                    if value == "null" {
-                        None
-                    } else {
-                        Some(value.trim_matches('"').to_string())
-                    }
-                }),
-            open_interest: filtered_df
-                .column("open_interest")
-                .ok()
-                .and_then(|c| c.get(i).ok())
-                .and_then(|v| v.to_string().parse().ok()),
+            instrument_name: filtered_df.column("instrument_name").unwrap().get(i).unwrap().to_string().trim_matches('"').to_string(),
+            currency: filtered_df.column("currency").unwrap().get(i).unwrap().to_string().trim_matches('"').to_string(),
+            expiry_token: filtered_df.column("expiry_token").unwrap().get(i).unwrap().to_string().trim_matches('"').to_string(),
+            expiry_iso: filtered_df.column("expiry_iso").unwrap().get(i).unwrap().to_string().trim_matches('"').to_string(),
+            timestamp_ms: filtered_df.column("timestamp_ms").unwrap().get(i).unwrap().to_string().parse().unwrap_or(0),
+            timestamp_utc: filtered_df.column("timestamp_utc").unwrap().get(i).unwrap().to_string().trim_matches('"').to_string(),
+            direction: filtered_df.column("direction").unwrap().get(i).unwrap().to_string().trim_matches('"').to_string(),
+            price: filtered_df.column("price").unwrap().get(i).unwrap().to_string().parse().unwrap_or(0.0),
+            amount: filtered_df.column("amount").unwrap().get(i).unwrap().to_string().parse().unwrap_or(0.0),
+            iv: filtered_df.column("iv").unwrap().get(i).unwrap().to_string().parse().ok(),
+            index_price: filtered_df.column("index_price").unwrap().get(i).unwrap().to_string().parse().ok(),
+            mark_price: filtered_df.column("mark_price").unwrap().get(i).unwrap().to_string().parse().ok(),
+            trade_id: filtered_df.column("trade_id").unwrap().get(i).unwrap().to_string().trim_matches('"').to_string(),
+            trade_seq: filtered_df.column("trade_seq").unwrap().get(i).unwrap().to_string().parse().unwrap_or(0),
+            block_trade_id: {
+                let val = filtered_df.column("block_trade_id").unwrap().get(i).unwrap().to_string();
+                if val == "null" { None } else { Some(val.trim_matches('"').to_string()) }
+            },
+            liquidity: {
+                let val = filtered_df.column("liquidity").unwrap().get(i).unwrap().to_string();
+                if val == "null" { None } else { Some(val.trim_matches('"').to_string()) }
+            },
+            tick_direction: filtered_df.column("tick_direction").unwrap().get(i).unwrap().to_string().parse().ok(),
+            strike: filtered_df.column("strike").unwrap().get(i).unwrap().to_string().parse().ok(),
+            option_type: {
+                let val = filtered_df.column("option_type").unwrap().get(i).unwrap().to_string();
+                if val == "null" { None } else { Some(val.trim_matches('"').to_string()) }
+            },
+            open_interest: filtered_df.column("open_interest").unwrap().get(i).unwrap().to_string().parse().ok(),
+            interest_rate: filtered_df.column("interest_rate").unwrap().get(i).unwrap().to_string().parse().ok(),
         };
         rows.push(row);
     }
@@ -692,47 +997,108 @@ async fn data_api_filtered(
     Json(rows)
 }
 
-async fn expiries_handler(State(state): State<AppState>) -> Json<ExpiryResponse> {
-    let expiries_handle = state.expiries.clone();
-    let available = {
-        let guard = expiries_handle.read().await;
-        guard.clone()
-    };
-
-    let current_handle = state.current_expiry.clone();
-    let current = {
-        let guard = current_handle.read().await;
-        guard.clone()
-    };
-
-    Json(ExpiryResponse { available, current })
-}
-
-async fn load_expiry_handler(
-    State(state): State<AppState>,
-    Json(payload): Json<LoadRequest>,
-) -> Result<Json<LoadResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let expiry = payload.expiry.trim();
-
-    if expiry.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "Expiry date is required".to_string(),
-            }),
-        ));
+// Handler for metadata endpoint
+async fn get_column_metadata(State(app_state): State<AppState>) -> Json<MetadataResponse> {
+    let data = app_state.data.lock().await;
+    
+    if data.is_empty() {
+        return Json(MetadataResponse { 
+            columns: vec![],
+            available_expiries: vec![],
+        });
     }
-
-    match load_expiry_into_state(&state, expiry).await {
-        Ok(rows) => Ok(Json(LoadResponse {
-            expiry: expiry.to_string(),
-            rows,
-        })),
-        Err(err) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to load data: {}", err),
-            }),
-        )),
+    
+    let mut columns = vec![];
+    let schema = data.schema();
+    
+    for (name, dtype) in schema.iter() {
+        match dtype {
+            // Numeric columns
+            polars::datatypes::DataType::Float64 | 
+            polars::datatypes::DataType::Float32 |
+            polars::datatypes::DataType::Int64 |
+            polars::datatypes::DataType::Int32 |
+            polars::datatypes::DataType::UInt64 |
+            polars::datatypes::DataType::UInt32 => {
+                columns.push(ColumnMetadata {
+                    name: name.to_string(),
+                    data_type: "numeric".to_string(),
+                    min_value: Some(0.0), // Placeholder - could calculate actual min/max
+                    max_value: Some(100.0), // Placeholder - could calculate actual min/max
+                    unique_values: None,
+                    min_date: None,
+                    max_date: None,
+                });
+            },
+            
+            // String/categorical columns
+            polars::datatypes::DataType::String => {
+                // For now, just provide basic metadata without calculating unique values
+                if name.contains("date") || name.contains("time") || name == "timestamp" {
+                    columns.push(ColumnMetadata {
+                        name: name.to_string(),
+                        data_type: "date".to_string(),
+                        min_value: None,
+                        max_value: None,
+                        unique_values: Some(vec!["2025-01-01".to_string(), "2025-12-31".to_string()]), // Placeholder
+                        min_date: None,
+                        max_date: None,
+                    });
+                } else {
+                    columns.push(ColumnMetadata {
+                        name: name.to_string(),
+                        data_type: "categorical".to_string(),
+                        min_value: None,
+                        max_value: None,
+                        unique_values: Some(vec!["call".to_string(), "put".to_string()]), // Placeholder
+                        min_date: None,
+                        max_date: None,
+                    });
+                }
+            },
+            
+            // DateTime columns
+            polars::datatypes::DataType::Datetime(_, _) => {
+                columns.push(ColumnMetadata {
+                    name: name.to_string(),
+                    data_type: "date".to_string(),
+                    min_value: None,
+                    max_value: None,
+                    unique_values: None,
+                    min_date: None,
+                    max_date: None,
+                });
+            },
+            
+            _ => {
+                // Other types treated as categorical
+                columns.push(ColumnMetadata {
+                    name: name.to_string(),
+                    data_type: "other".to_string(),
+                    min_value: None,
+                    max_value: None,
+                    unique_values: None,
+                    min_date: None,
+                    max_date: None,
+                });
+            }
+        }
     }
+    
+    // Extract unique expiry dates from the actual data
+    let mut available_expiries = vec![];
+    if let Ok(expiry_column) = data.column("expiry_iso") {
+        let unique_expiries: std::collections::HashSet<String> = (0..expiry_column.len())
+            .map(|i| expiry_column.get(i).unwrap().to_string().trim_matches('"').to_string())
+            .filter(|s| !s.is_empty() && s != "null")
+            .collect();
+        
+        available_expiries = unique_expiries.into_iter().collect();
+        available_expiries.sort();
+    }
+    
+    Json(MetadataResponse { 
+        columns,
+        available_expiries,
+    })
 }

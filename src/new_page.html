@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>BTC Options Data - Advanced Filtering</title>
+    <style>
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            margin: 0;
+            padding: 20px;
+            background-color: #f8f9fa;
+        }
+        .container {
+            max-width: 98%;
+            margin: 0 auto;
+            background-color: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 25px;
+            text-align: center;
+        }
+        h1 { 
+            margin: 0;
+            font-size: 28px;
+            font-weight: 300;
+        }
+        
+        /* Filter Panel Styles */
+        .filter-panel {
+            background-color: #f8f9fa;
+            border-bottom: 2px solid #e9ecef;
+            padding: 20px;
+        }
+        .filter-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: #495057;
+        }
+        .filter-sections {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 25px;
+        }
+        .filter-section {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #dee2e6;
+        }
+        .filter-section h3 {
+            margin: 0 0 10px 0;
+            font-size: 14px;
+            font-weight: 600;
+            color: #6c757d;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .filter-row {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+            gap: 8px;
+        }
+        .filter-row label {
+            min-width: 80px;
+            font-size: 12px;
+            color: #6c757d;
+        }
+        .filter-input {
+            flex: 1;
+            padding: 6px 10px;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        .filter-buttons {
+            margin-top: 15px;
+            text-align: center;
+        }
+        .btn {
+            padding: 10px 20px;
+            margin: 0 5px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .btn-secondary {
+            background-color: #6c757d;
+            color: white;
+        }
+        .btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        }
+        
+        /* Stats Panel */
+        .stats-container {
+            display: flex;
+            justify-content: space-around;
+            padding: 20px;
+            background-color: #ffffff;
+            border-bottom: 1px solid #dee2e6;
+        }
+        .stat-box {
+            text-align: center;
+            padding: 10px;
+        }
+        .stat-number {
+            font-size: 24px;
+            font-weight: bold;
+            color: #495057;
+        }
+        .stat-label {
+            font-size: 12px;
+            color: #6c757d;
+            margin-top: 5px;
+        }
+        
+        /* Table Styles */
+        .table-container {
+            padding: 20px;
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+        }
+        th, td {
+            padding: 8px 6px;
+            text-align: left;
+            border-bottom: 1px solid #dee2e6;
+            white-space: nowrap;
+        }
+        th {
+            background-color: #f8f9fa;
+            font-weight: 600;
+            color: #495057;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        tr:hover {
+            background-color: #f8f9fa;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+        }
+        
+        /* Responsive design */
+        @media (max-width: 1200px) {
+            .filter-sections {
+                grid-template-columns: 1fr 1fr;
+            }
+        }
+        @media (max-width: 768px) {
+            .filter-sections {
+                grid-template-columns: 1fr;
+            }
+            .stats-container {
+                flex-wrap: wrap;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🪙 BTC Options Trading Data</h1>
+            <p>Advanced filtering and real-time data analysis</p>
+        </div>
+        
+        <!-- Advanced Filter Panel -->
+        <div class="filter-panel">
+            <div class="filter-title">🔍 Advanced Filters</div>
+            <div class="filter-sections">
+                <!-- Numeric Filters -->
+                <div class="filter-section">
+                    <h3>Numeric Ranges</h3>
+                    <div class="filter-row">
+                        <label>Price:</label>
+                        <input type="number" class="filter-input" id="price_min" placeholder="Min" step="0.0001">
+                        <input type="number" class="filter-input" id="price_max" placeholder="Max" step="0.0001">
+                    </div>
+                    <div class="filter-row">
+                        <label>Strike:</label>
+                        <input type="number" class="filter-input" id="strike_min" placeholder="Min">
+                        <input type="number" class="filter-input" id="strike_max" placeholder="Max">
+                    </div>
+                    <div class="filter-row">
+                        <label>Amount:</label>
+                        <input type="number" class="filter-input" id="amount_min" placeholder="Min">
+                        <input type="number" class="filter-input" id="amount_max" placeholder="Max">
+                    </div>
+                    <div class="filter-row">
+                        <label>IV:</label>
+                        <input type="number" class="filter-input" id="iv_min" placeholder="Min %" step="0.01">
+                        <input type="number" class="filter-input" id="iv_max" placeholder="Max %" step="0.01">
+                    </div>
+                </div>
+                
+                <!-- Categorical Filters -->
+                <div class="filter-section">
+                    <h3>Categories</h3>
+                    <div class="filter-row">
+                        <label>Option Type:</label>
+                        <select class="filter-input" id="option_type">
+                            <option value="">All</option>
+                            <option value="call">Call</option>
+                            <option value="put">Put</option>
+                        </select>
+                    </div>
+                    <div class="filter-row">
+                        <label>Direction:</label>
+                        <select class="filter-input" id="direction">
+                            <option value="">All</option>
+                            <option value="buy">Buy</option>
+                            <option value="sell">Sell</option>
+                        </select>
+                    </div>
+                    <div class="filter-row">
+                        <label>Liquidity:</label>
+                        <select class="filter-input" id="liquidity">
+                            <option value="">All</option>
+                            <option value="M">Maker</option>
+                            <option value="T">Taker</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <!-- Date & Time Filters -->
+                <div class="filter-section">
+                    <h3>Date & Time</h3>
+                    <div class="filter-row">
+                        <label>From:</label>
+                        <input type="datetime-local" class="filter-input" id="timestamp_min">
+                    </div>
+                    <div class="filter-row">
+                        <label>To:</label>
+                        <input type="datetime-local" class="filter-input" id="timestamp_max">
+                    </div>
+                    <div class="filter-row">
+                        <label>Expiry:</label>
+                        <select class="filter-input" id="expiry_date">
+                            <option value="">All Expiries</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="filter-buttons">
+                <button class="btn btn-primary" onclick="applyFilters()">🔍 Apply Filters</button>
+                <button class="btn btn-secondary" onclick="clearFilters()">🔄 Clear All</button>
+                <button class="btn btn-secondary" onclick="refreshData()">📊 Refresh Data</button>
+            </div>
+        </div>
+        
+        <!-- Stats Summary -->
+        <div class="stats-container" id="statsContainer">
+            <div class="stat-box">
+                <div class="stat-number">-</div>
+                <div class="stat-label">Total Trades</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-number">-</div>
+                <div class="stat-label">Instruments</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-number">-</div>
+                <div class="stat-label">Total Volume</div>
+            </div>
+            <div class="stat-box">
+                <div class="stat-number">-</div>
+                <div class="stat-label">Avg Price</div>
+            </div>
+        </div>
+        
+        <!-- Data Table -->
+        <div class="table-container">
+            <div id="loading" class="loading">Loading BTC options data...</div>
+            <table id="dataTable" style="display: none;">
+                <thead>
+                    <tr>
+                        <th>Timestamp</th>
+                        <th>Instrument</th>
+                        <th>Price</th>
+                        <th>Amount</th>
+                        <th>Direction</th>
+                        <th>Strike</th>
+                        <th>Type</th>
+                        <th>Expiry</th>
+                        <th>IV (%)</th>
+                        <th>Delta</th>
+                        <th>Gamma</th>
+                        <th>Theta</th>
+                        <th>Vega</th>
+                        <th>Index Price</th>
+                        <th>Mark Price</th>
+                        <th>Trade ID</th>
+                        <th>Liquidity</th>
+                    </tr>
+                </thead>
+                <tbody id="tableBody">
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        let allData = [];
+        let filteredData = [];
+        
+        // Load initial data
+        async function loadData() {
+            try {
+                const response = await fetch('/api/data');
+                allData = await response.json();
+                filteredData = [...allData];
+                renderTable(filteredData);
+                updateStats(filteredData);
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('dataTable').style.display = 'table';
+            } catch (error) {
+                console.error('Error loading data:', error);
+                document.getElementById('loading').innerHTML = 'Error loading data. Please try again.';
+            }
+        }
+        
+        // Apply filters
+        async function applyFilters() {
+            const params = new URLSearchParams();
+            
+            // Numeric filters
+            const numericFilters = ['price', 'strike', 'amount', 'iv'];
+            numericFilters.forEach(filter => {
+                const min = document.getElementById(`${filter}_min`).value;
+                const max = document.getElementById(`${filter}_max`).value;
+                if (min) params.append(`${filter}_min`, min);
+                if (max) params.append(`${filter}_max`, max);
+            });
+            
+            // Categorical filters
+            const categoricalFilters = ['option_type', 'direction', 'liquidity', 'expiry_date'];
+            categoricalFilters.forEach(filter => {
+                const value = document.getElementById(filter).value;
+                if (value) params.append(filter, value);
+            });
+            
+            // Date filters
+            const timestampMin = document.getElementById('timestamp_min').value;
+            const timestampMax = document.getElementById('timestamp_max').value;
+            if (timestampMin) params.append('timestamp_min', new Date(timestampMin).toISOString());
+            if (timestampMax) params.append('timestamp_max', new Date(timestampMax).toISOString());
+            
+            try {
+                const response = await fetch(`/api/data?${params.toString()}`);
+                filteredData = await response.json();
+                renderTable(filteredData);
+                updateStats(filteredData);
+            } catch (error) {
+                console.error('Error applying filters:', error);
+            }
+        }
+        
+        // Clear all filters
+        function clearFilters() {
+            document.querySelectorAll('.filter-input').forEach(input => {
+                input.value = '';
+            });
+            filteredData = [...allData];
+            renderTable(filteredData);
+            updateStats(filteredData);
+        }
+        
+        // Refresh data from server
+        function refreshData() {
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('dataTable').style.display = 'none';
+            loadData();
+        }
+        
+        // Render table
+        function renderTable(data) {
+            const tbody = document.getElementById('tableBody');
+            tbody.innerHTML = '';
+            
+            data.forEach(row => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${new Date(row.timestamp * 1000).toLocaleString()}</td>
+                    <td>${row.instrument_name || '-'}</td>
+                    <td>$${(row.price || 0).toFixed(6)}</td>
+                    <td>${row.amount || '-'}</td>
+                    <td>${row.direction || '-'}</td>
+                    <td>${row.strike || '-'}</td>
+                    <td>${row.option_type || '-'}</td>
+                    <td>${row.expiry_iso || '-'}</td>
+                    <td>${row.iv ? (row.iv * 100).toFixed(2) : '-'}</td>
+                    <td>${row.delta ? row.delta.toFixed(4) : '-'}</td>
+                    <td>${row.gamma ? row.gamma.toFixed(6) : '-'}</td>
+                    <td>${row.theta ? row.theta.toFixed(6) : '-'}</td>
+                    <td>${row.vega ? row.vega.toFixed(6) : '-'}</td>
+                    <td>$${row.index_price ? row.index_price.toFixed(2) : '-'}</td>
+                    <td>$${row.mark_price ? row.mark_price.toFixed(6) : '-'}</td>
+                    <td>${row.trade_id || '-'}</td>
+                    <td>${row.liquidity || '-'}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
+        
+        // Update statistics
+        function updateStats(data) {
+            const statsContainer = document.getElementById('statsContainer');
+            const totalRows = data.length;
+            const uniqueInstruments = new Set(data.map(row => row.instrument_name)).size;
+            const totalVolume = data.reduce((sum, row) => sum + (row.amount || 0), 0);
+            const avgPrice = totalRows > 0 ? data.reduce((sum, row) => sum + (row.price || 0), 0) / totalRows : 0;
+            
+            statsContainer.innerHTML = `
+                <div class="stat-box">
+                    <div class="stat-number">${totalRows}</div>
+                    <div class="stat-label">Total Trades</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">${uniqueInstruments}</div>
+                    <div class="stat-label">Instruments</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">${totalVolume.toFixed(1)}</div>
+                    <div class="stat-label">Total Volume</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-number">$${avgPrice.toFixed(6)}</div>
+                    <div class="stat-label">Avg Price</div>
+                </div>
+            `;
+        }
+        
+        // Load data when page loads
+        loadData();
+    </script>
+</body>
+</html>
