@@ -86,6 +86,7 @@ struct DataRow {
     currency: String,
     expiry_token: String,
     expiry_iso: String,
+    timestamp: i64,        // Timestamp in seconds for JavaScript
     timestamp_ms: i64,
     timestamp_utc: String,
     direction: String,
@@ -444,11 +445,11 @@ async fn data_table_page() -> Html<&'static str> {
                     <h3>Date & Time</h3>
                     <div class="filter-row">
                         <label>From:</label>
-                        <input type="datetime-local" class="filter-input" id="timestamp_min">
+                        <input type="datetime-local" class="filter-input" id="timestamp_from">
                     </div>
                     <div class="filter-row">
                         <label>To:</label>
-                        <input type="datetime-local" class="filter-input" id="timestamp_max">
+                        <input type="datetime-local" class="filter-input" id="timestamp_to">
                     </div>
                     <div class="filter-row">
                         <label>Expiry:</label>
@@ -571,10 +572,10 @@ async fn data_table_page() -> Html<&'static str> {
             });
             
             // Date filters
-            const timestampMin = document.getElementById('timestamp_min').value;
-            const timestampMax = document.getElementById('timestamp_max').value;
-            if (timestampMin) params.append('timestamp_min', new Date(timestampMin).toISOString());
-            if (timestampMax) params.append('timestamp_max', new Date(timestampMax).toISOString());
+            const timestampFrom = document.getElementById('timestamp_from').value;
+            const timestampTo = document.getElementById('timestamp_to').value;
+            if (timestampFrom) params.append('timestamp_from', new Date(timestampFrom).toISOString());
+            if (timestampTo) params.append('timestamp_to', new Date(timestampTo).toISOString());
             
             try {
                 const url = '/api/data?' + params.toString();
@@ -898,6 +899,10 @@ async fn data_api_filtered(Query(params): Query<FilterParams>, State(app_state):
             currency: filtered_df.column("currency").unwrap().get(i).unwrap().to_string().trim_matches('"').to_string(),
             expiry_token: filtered_df.column("expiry_token").unwrap().get(i).unwrap().to_string().trim_matches('"').to_string(),
             expiry_iso: filtered_df.column("expiry_iso").unwrap().get(i).unwrap().to_string().trim_matches('"').to_string(),
+            timestamp: {
+                let timestamp_ms = filtered_df.column("timestamp_ms").unwrap().get(i).unwrap().to_string().parse().unwrap_or(0);
+                timestamp_ms / 1000  // Convert milliseconds to seconds for JavaScript
+            },
             timestamp_ms: filtered_df.column("timestamp_ms").unwrap().get(i).unwrap().to_string().parse().unwrap_or(0),
             timestamp_utc: filtered_df.column("timestamp_utc").unwrap().get(i).unwrap().to_string().trim_matches('"').to_string(),
             direction: filtered_df.column("direction").unwrap().get(i).unwrap().to_string().trim_matches('"').to_string(),
