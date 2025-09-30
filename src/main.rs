@@ -60,7 +60,6 @@ struct FilterParams {
     
     // Legacy filters for backward compatibility
     strike: Option<f64>,
-    expiry_date: Option<String>,
     option_type: Option<String>,
 }
 
@@ -285,6 +284,71 @@ async fn data_table_page() -> Html<&'static str> {
             border-radius: 4px;
             font-size: 12px;
         }
+        
+        /* Multi-select expiry dropdown */
+        .expiry-multi-select {
+            flex: 1;
+            position: relative;
+        }
+        .expiry-select-header {
+            padding: 6px 10px;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            font-size: 12px;
+            background: white;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            min-height: 20px;
+        }
+        .expiry-select-header:hover {
+            background: #f8f9fa;
+        }
+        .dropdown-arrow {
+            transition: transform 0.2s;
+        }
+        .dropdown-arrow.open {
+            transform: rotate(180deg);
+        }
+        .expiry-dropdown {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: white;
+            border: 1px solid #ced4da;
+            border-top: none;
+            border-radius: 0 0 4px 4px;
+            max-height: 200px;
+            overflow-y: auto;
+            z-index: 1000;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .expiry-option {
+            padding: 6px 10px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .expiry-option:hover {
+            background: #f8f9fa;
+        }
+        .expiry-option:last-child {
+            border-bottom: none;
+        }
+        .expiry-option input[type="checkbox"] {
+            margin: 0;
+        }
+        .expiry-option label {
+            margin: 0;
+            cursor: pointer;
+            flex: 1;
+            min-width: auto;
+        }
+        
         .filter-buttons {
             margin-top: 15px;
             text-align: center;
@@ -475,9 +539,21 @@ async fn data_table_page() -> Html<&'static str> {
                     </div>
                     <div class="filter-row">
                         <label>Expiry:</label>
-                        <select class="filter-input" id="expiry_date">
-                            <option value="">All Expiries</option>
-                        </select>
+                        <div class="expiry-multi-select">
+                            <div class="expiry-select-header" onclick="toggleExpiryDropdown()">
+                                <span id="expiry-selected-text">All Expiries</span>
+                                <span class="dropdown-arrow">▼</span>
+                            </div>
+                            <div class="expiry-dropdown" id="expiry-dropdown" style="display: none;">
+                                <div class="expiry-option">
+                                    <input type="checkbox" id="expiry-all" onchange="handleExpiryAllChange()">
+                                    <label for="expiry-all">All Expiries</label>
+                                </div>
+                                <div id="expiry-options-container">
+                                    <!-- Expiry options will be populated here -->
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -587,13 +663,26 @@ async fn data_table_page() -> Html<&'static str> {
                 { frontend: 'instrument_category', backend: 'instrument_categories' },
                 { frontend: 'option_type', backend: 'option_types' },
                 { frontend: 'direction', backend: 'directions' },
-                { frontend: 'liquidity', backend: 'liquidities' },
-                { frontend: 'expiry_date', backend: 'expiry_dates' }
+                { frontend: 'liquidity', backend: 'liquidities' }
             ];
             categoricalFilters.forEach(filter => {
                 const value = document.getElementById(filter.frontend).value;
                 if (value) params.append(filter.backend, value);
             });
+            
+            // Handle multi-select expiry dates
+            const selectedExpiries = [];
+            const expiryCheckboxes = document.querySelectorAll('#expiry-options-container input[type="checkbox"]:checked');
+            expiryCheckboxes.forEach(checkbox => {
+                selectedExpiries.push(checkbox.value);
+            });
+            if (selectedExpiries.length > 0) {
+                // Check if all expiries are selected (which means no filter)
+                const allCheckboxes = document.querySelectorAll('#expiry-options-container input[type="checkbox"]');
+                if (selectedExpiries.length < allCheckboxes.length) {
+                    params.append('expiry_dates', selectedExpiries.join(','));
+                }
+            }
             
             // Date filters
             const timestampFrom = document.getElementById('timestamp_from').value;
@@ -624,6 +713,15 @@ async fn data_table_page() -> Html<&'static str> {
             document.querySelectorAll('.filter-input').forEach(input => {
                 input.value = '';
             });
+            
+            // Clear expiry checkboxes and reset to "All"
+            document.querySelectorAll('#expiry-options-container input[type="checkbox"]').forEach(checkbox => {
+                checkbox.checked = false;
+            });
+            const allCheckbox = document.getElementById('expiry-all');
+            if (allCheckbox) allCheckbox.checked = true;
+            updateExpirySelection();
+            
             filteredData = [...allData];
             renderTable(filteredData);
             updateStats(filteredData);
@@ -710,13 +808,25 @@ async fn data_table_page() -> Html<&'static str> {
                 console.log('Loaded metadata:', metadata);
                 
                 // Populate expiry dates dropdown
-                const expirySelect = document.getElementById('expiry_date');
+                const expiryContainer = document.getElementById('expiry-options-container');
                 if (metadata.available_expiries && metadata.available_expiries.length > 0) {
                     metadata.available_expiries.forEach(expiry => {
-                        const option = document.createElement('option');
-                        option.value = expiry;
-                        option.textContent = expiry;
-                        expirySelect.appendChild(option);
+                        const optionDiv = document.createElement('div');
+                        optionDiv.className = 'expiry-option';
+                        
+                        const checkbox = document.createElement('input');
+                        checkbox.type = 'checkbox';
+                        checkbox.id = 'expiry-' + expiry;
+                        checkbox.value = expiry;
+                        checkbox.onchange = updateExpirySelection;
+                        
+                        const label = document.createElement('label');
+                        label.htmlFor = 'expiry-' + expiry;
+                        label.textContent = expiry;
+                        
+                        optionDiv.appendChild(checkbox);
+                        optionDiv.appendChild(label);
+                        expiryContainer.appendChild(optionDiv);
                     });
                 }
                 
@@ -727,6 +837,64 @@ async fn data_table_page() -> Html<&'static str> {
                 // Don't fail completely if metadata fails to load
             }
         }
+        
+        // Multi-select expiry functions
+        function toggleExpiryDropdown() {
+            const dropdown = document.getElementById('expiry-dropdown');
+            const arrow = document.querySelector('.dropdown-arrow');
+            const isOpen = dropdown.style.display === 'block';
+            
+            dropdown.style.display = isOpen ? 'none' : 'block';
+            arrow.classList.toggle('open', !isOpen);
+        }
+        
+        function updateExpirySelection() {
+            const checkboxes = document.querySelectorAll('#expiry-options-container input[type="checkbox"]');
+            const allCheckbox = document.getElementById('expiry-all');
+            const selectedText = document.getElementById('expiry-selected-text');
+            
+            const selectedValues = [];
+            checkboxes.forEach(checkbox => {
+                if (checkbox.checked) {
+                    selectedValues.push(checkbox.value);
+                }
+            });
+            
+            // Update "All" checkbox based on individual selections
+            const allSelected = selectedValues.length === checkboxes.length;
+            allCheckbox.checked = allSelected || selectedValues.length === 0;
+            
+            // Update display text
+            if (selectedValues.length === 0 || allSelected) {
+                selectedText.textContent = 'All Expiries';
+            } else if (selectedValues.length === 1) {
+                selectedText.textContent = selectedValues[0];
+            } else {
+                selectedText.textContent = `${selectedValues.length} expiries selected`;
+            }
+        }
+        
+        function handleExpiryAllChange() {
+            const allCheckbox = document.getElementById('expiry-all');
+            const checkboxes = document.querySelectorAll('#expiry-options-container input[type="checkbox"]');
+            
+            checkboxes.forEach(checkbox => {
+                checkbox.checked = allCheckbox.checked;
+            });
+            
+            updateExpirySelection();
+        }
+        
+        // Close dropdown when clicking outside
+        document.addEventListener('click', function(event) {
+            const expirySelect = document.querySelector('.expiry-multi-select');
+            if (expirySelect && !expirySelect.contains(event.target)) {
+                const dropdown = document.getElementById('expiry-dropdown');
+                const arrow = document.querySelector('.dropdown-arrow');
+                dropdown.style.display = 'none';
+                arrow.classList.remove('open');
+            }
+        });
         
         // Load data when page loads
         document.addEventListener('DOMContentLoaded', function() {
@@ -915,9 +1083,6 @@ async fn data_api_filtered(Query(params): Query<FilterParams>, State(app_state):
     }
     if let Some(strike) = params.strike {
         lazy_df = lazy_df.filter(col("strike").eq(lit(strike)));
-    }
-    if let Some(expiry_date) = &params.expiry_date {
-        lazy_df = lazy_df.filter(col("expiry_iso").eq(lit(expiry_date.as_str())));
     }
     
     // Execute the filters
