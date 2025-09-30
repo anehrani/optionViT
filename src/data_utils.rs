@@ -6,6 +6,17 @@ use std::error::Error;
 use polars::prelude::*;
 use rustc_hash::FxHashMap;
 
+// Helper function to determine instrument category
+fn get_instrument_category(instrument_name: &str) -> String {
+    if instrument_name.contains("-FS-") {
+        "Future Spreads".to_string()
+    } else if instrument_name.ends_with("-C") || instrument_name.ends_with("-P") {
+        "Options".to_string()
+    } else {
+        "Futures".to_string()
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct TradeData {
     pub instrument_name: String,
@@ -602,12 +613,13 @@ fn create_dataframe_from_data(
     let mut option_types = Vec::new();
     let mut open_interests = Vec::new();
     let mut interest_rates = Vec::new();
+    let mut instrument_categories = Vec::new();
     
     for (instrument_name, currency, expiry_token, expiry_iso, timestamp_ms, timestamp_utc,
          direction, price, amount, iv, index_price, mark_price, trade_id, trade_seq,
          block_trade_id, liquidity, tick_direction, strike, option_type, open_interest, interest_rate) in data {
         
-        instrument_names.push(instrument_name);
+        instrument_names.push(instrument_name.clone());
         currencies.push(currency);
         expiry_tokens.push(expiry_token);
         expiry_isos.push(expiry_iso);
@@ -628,6 +640,7 @@ fn create_dataframe_from_data(
         option_types.push(option_type);
         open_interests.push(open_interest);
         interest_rates.push(interest_rate);
+        instrument_categories.push(get_instrument_category(&instrument_name));
     }
     
     let df = df! [
@@ -652,6 +665,7 @@ fn create_dataframe_from_data(
         "option_type" => option_types,
         "open_interest" => open_interests,
         "interest_rate" => interest_rates,
+        "instrument_category" => instrument_categories,
     ]?;
     
     Ok(df)

@@ -56,6 +56,7 @@ struct FilterParams {
     directions: Option<String>,
     option_types: Option<String>,
     liquidities: Option<String>,
+    instrument_categories: Option<String>,  // Options, Futures, Future Spreads
     
     // Legacy filters for backward compatibility
     strike: Option<f64>,
@@ -74,6 +75,17 @@ struct ColumnMetadata {
     max_date: Option<String>,           // For date columns
 }
 
+// Helper function to determine instrument category
+fn get_instrument_category(instrument_name: &str) -> String {
+    if instrument_name.contains("-FS-") {
+        "Future Spreads".to_string()
+    } else if instrument_name.ends_with("-C") || instrument_name.ends_with("-P") {
+        "Options".to_string()
+    } else {
+        "Futures".to_string()
+    }
+}
+
 #[derive(Serialize)]
 struct MetadataResponse {
     columns: Vec<ColumnMetadata>,
@@ -86,6 +98,7 @@ struct DataRow {
     currency: String,
     expiry_token: String,
     expiry_iso: String,
+    instrument_category: String,  // Options, Futures, or Future Spreads
     timestamp: i64,        // Timestamp in seconds for JavaScript
     timestamp_ms: i64,
     timestamp_utc: String,
@@ -415,6 +428,15 @@ async fn data_table_page() -> Html<&'static str> {
                 <div class="filter-section">
                     <h3>Categories</h3>
                     <div class="filter-row">
+                        <label>Instrument:</label>
+                        <select class="filter-input" id="instrument_category">
+                            <option value="">All</option>
+                            <option value="Options">Options</option>
+                            <option value="Futures">Futures</option>
+                            <option value="Future Spreads">Future Spreads</option>
+                        </select>
+                    </div>
+                    <div class="filter-row">
                         <label>Option Type:</label>
                         <select class="filter-input" id="option_type">
                             <option value="">All</option>
@@ -495,6 +517,7 @@ async fn data_table_page() -> Html<&'static str> {
                     <tr>
                         <th>Timestamp</th>
                         <th>Instrument</th>
+                        <th>Category</th>
                         <th>Price</th>
                         <th>Amount</th>
                         <th>Direction</th>
@@ -561,6 +584,7 @@ async fn data_table_page() -> Html<&'static str> {
             
             // Categorical filters (need to map frontend field names to backend parameter names)
             const categoricalFilters = [
+                { frontend: 'instrument_category', backend: 'instrument_categories' },
                 { frontend: 'option_type', backend: 'option_types' },
                 { frontend: 'direction', backend: 'directions' },
                 { frontend: 'liquidity', backend: 'liquidities' },
@@ -624,6 +648,7 @@ async fn data_table_page() -> Html<&'static str> {
                 tr.innerHTML = 
                     '<td>' + (row.timestamp ? new Date(row.timestamp * 1000).toLocaleString() : '-') + '</td>' +
                     '<td>' + (row.instrument_name || '-') + '</td>' +
+                    '<td>' + (row.instrument_category || '-') + '</td>' +
                     '<td>$' + ((row.price || 0).toFixed(6)) + '</td>' +
                     '<td>' + (row.amount || '-') + '</td>' +
                     '<td>' + (row.direction || '-') + '</td>' +
@@ -874,6 +899,16 @@ async fn data_api_filtered(Query(params): Query<FilterParams>, State(app_state):
         }
     }
     
+    if let Some(instrument_categories) = &params.instrument_categories {
+        let values: Vec<&str> = instrument_categories.split(',').map(|s| s.trim()).collect();
+        if !values.is_empty() {
+            let expr = values.iter().fold(lit(false), |acc, &val| {
+                acc.or(col("instrument_category").eq(lit(val)))
+            });
+            lazy_df = lazy_df.filter(expr);
+        }
+    }
+    
     // Legacy filters for backward compatibility
     if let Some(option_type) = &params.option_type {
         lazy_df = lazy_df.filter(col("option_type").eq(lit(option_type.as_str())));
@@ -899,6 +934,7 @@ async fn data_api_filtered(Query(params): Query<FilterParams>, State(app_state):
             currency: filtered_df.column("currency").unwrap().get(i).unwrap().to_string().trim_matches('"').to_string(),
             expiry_token: filtered_df.column("expiry_token").unwrap().get(i).unwrap().to_string().trim_matches('"').to_string(),
             expiry_iso: filtered_df.column("expiry_iso").unwrap().get(i).unwrap().to_string().trim_matches('"').to_string(),
+            instrument_category: filtered_df.column("instrument_category").unwrap().get(i).unwrap().to_string().trim_matches('"').to_string(),
             timestamp: {
                 let timestamp_ms = filtered_df.column("timestamp_ms").unwrap().get(i).unwrap().to_string().parse().unwrap_or(0);
                 timestamp_ms / 1000  // Convert milliseconds to seconds for JavaScript
