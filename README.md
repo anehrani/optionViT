@@ -5,8 +5,10 @@ A high-performance web application for fetching and filtering cryptocurrency opt
 ## 🎯 Key Features
 
 - **Two-Part Filtering System**: Fetch data once from API, filter instantly in browser
+- **Greeks Analysis & Portfolio Risk**: Real-time calculation of collective Delta, Gamma, and price projections
 - **Real-Time Market Data**: Fetches live options data including OI, Volume, IV, and prices
 - **Advanced Filtering**: Filter by expiration date, open interest, volume, IV%, and option type
+- **Price Movement Scenarios**: P&L projections for ±1% and ±5% underlying price moves
 - **Beautiful Modern UI**: Gradient design with smooth animations and responsive layout
 - **Zero Latency Filtering**: Client-side filtering provides instant results without API calls
 

@@ -116,6 +116,10 @@ impl DeribitClient {
                                     if let Some(mark_price) = ticker_result.get("mark_price") {
                                         obj.insert("mark_price".to_string(), mark_price.clone());
                                     }
+                                    // Add underlying price (spot price)
+                                    if let Some(underlying) = ticker_result.get("underlying_price") {
+                                        obj.insert("underlying_price".to_string(), underlying.clone());
+                                    }
                                 }
                             }
                         }

@@ -15,6 +15,7 @@ fn get_html_content() -> &'static str {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Deribit Options Data Fetcher</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -643,6 +644,207 @@ fn get_html_content() -> &'static str {
                 min-width: 600px;
             }
         }
+        
+        /* Greeks Analysis Section */
+        .greeks-section {
+            padding: 35px;
+            background: linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%);
+            border-bottom: 1px solid rgba(234, 88, 12, 0.1);
+            display: none;
+        }
+        
+        .greeks-section::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, #ea580c, #f97316, #fb923c);
+        }
+        
+        .greeks-title {
+            font-size: 22px;
+            font-weight: 700;
+            color: #7c2d12;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .greeks-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            margin-bottom: 25px;
+        }
+        
+        @media (min-width: 992px) {
+            .greeks-grid {
+                grid-template-columns: repeat(4, 1fr);
+            }
+        }
+        
+        .greek-card {
+            background: linear-gradient(135deg, #ffffff 0%, #fff7ed 100%);
+            padding: 24px;
+            border-radius: 14px;
+            box-shadow: 0 4px 12px rgba(234, 88, 12, 0.15), 0 1px 3px rgba(0, 0, 0, 0.05);
+            border: 2px solid rgba(251, 146, 60, 0.2);
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .greek-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 6px 18px rgba(234, 88, 12, 0.25), 0 2px 6px rgba(0, 0, 0, 0.08);
+            border-color: rgba(251, 146, 60, 0.4);
+        }
+        
+        .greek-card .label {
+            font-size: 12px;
+            color: #9a3412;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            font-weight: 600;
+        }
+        
+        .greek-card .value {
+            font-size: 28px;
+            font-weight: 700;
+            color: #7c2d12;
+            font-family: 'SF Mono', 'Monaco', 'Courier New', monospace;
+        }
+        
+        .greek-card .subtitle {
+            font-size: 11px;
+            color: #c2410c;
+            margin-top: 6px;
+            opacity: 0.8;
+        }
+        
+        .projection-section {
+            background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+            padding: 20px 24px;
+            border-radius: 12px;
+            border: 2px solid rgba(234, 179, 8, 0.3);
+            margin-top: 20px;
+        }
+        
+        .projection-title {
+            font-size: 16px;
+            font-weight: 700;
+            color: #713f12;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .projection-grid {
+            display: grid;
+            grid-template-columns: repeat(1, 1fr);
+            gap: 15px;
+        }
+        
+        @media (min-width: 768px) {
+            .projection-grid {
+                grid-template-columns: repeat(3, 1fr);
+            }
+        }
+        
+        .projection-card {
+            background: white;
+            padding: 16px;
+            border-radius: 10px;
+            border: 1px solid rgba(202, 138, 4, 0.2);
+        }
+        
+        .projection-card .scenario {
+            font-size: 13px;
+            color: #854d0e;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        
+        .projection-card .pl-value {
+            font-size: 24px;
+            font-weight: 700;
+            font-family: 'SF Mono', 'Monaco', 'Courier New', monospace;
+        }
+        
+        .projection-card .pl-value.positive {
+            color: #059669;
+        }
+        
+        .projection-card .pl-value.negative {
+            color: #dc2626;
+        }
+        
+        .projection-card .details {
+            font-size: 11px;
+            color: #92400e;
+            margin-top: 6px;
+            opacity: 0.7;
+        }
+        
+        /* Chart Section */
+        .chart-section {
+            background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+            padding: 35px;
+            border-radius: 16px;
+            margin-top: 25px;
+            box-shadow: 0 4px 12px rgba(14, 165, 233, 0.15);
+            border: 2px solid rgba(14, 165, 233, 0.2);
+        }
+        
+        .chart-title {
+            font-size: 18px;
+            font-weight: 700;
+            color: #075985;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .chart-container {
+            position: relative;
+            height: 500px;
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+        }
+        
+        .chart-info {
+            display: flex;
+            gap: 20px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+        
+        .chart-info-item {
+            background: rgba(255, 255, 255, 0.8);
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-size: 12px;
+            border: 1px solid rgba(14, 165, 233, 0.2);
+        }
+        
+        .chart-info-item .label {
+            color: #64748b;
+            font-weight: 500;
+            margin-right: 6px;
+        }
+        
+        .chart-info-item .value {
+            color: #0f172a;
+            font-weight: 700;
+        }
     </style>
 </head>
 <body>
@@ -755,6 +957,38 @@ fn get_html_content() -> &'static str {
         
         <div id="error" style="display: none;"></div>
         
+        <!-- GREEKS ANALYSIS SECTION -->
+        <div class="greeks-section" id="greeksSection">
+            <div class="greeks-title">
+                📊 Greeks Analysis & Portfolio Risk
+            </div>
+            
+            <div class="greeks-grid" id="greeksGrid">
+                <!-- Greeks cards will be populated by JavaScript -->
+            </div>
+            
+            <div class="projection-section">
+                <div class="projection-title">
+                    📈 Price Movement Projections
+                </div>
+                <div class="projection-grid" id="projectionGrid">
+                    <!-- Projection cards will be populated by JavaScript -->
+                </div>
+            </div>
+            
+            <div class="chart-section">
+                <div class="chart-title">
+                    📊 Greeks & Value Projection Chart
+                </div>
+                <div class="chart-container">
+                    <canvas id="greeksChart"></canvas>
+                </div>
+                <div class="chart-info" id="chartInfo">
+                    <!-- Chart info will be populated by JavaScript -->
+                </div>
+            </div>
+        </div>
+        
         <div class="table-section">
             <div id="stats" class="stats" style="display: none;"></div>
             <div id="tableContainer"></div>
@@ -772,6 +1006,7 @@ fn get_html_content() -> &'static str {
             document.getElementById('includeExpired').checked = false;
             clearClientFilters();
             document.getElementById('filterSection').style.display = 'none';
+            document.getElementById('greeksSection').style.display = 'none';
             allFetchedData = [];
             filteredData = [];
             document.getElementById('tableContainer').innerHTML = '';
@@ -932,6 +1167,7 @@ fn get_html_content() -> &'static str {
             console.log('✅ After filtering:', filteredData.length, 'instruments match criteria');
             displayStats(filteredData);
             displayTable(filteredData);
+            displayGreeks(filteredData);
         }
         
         function displayStats(data) {
@@ -1113,6 +1349,513 @@ fn get_html_content() -> &'static str {
             }
             
             return value;
+        }
+        
+        // ============================================
+        // GREEKS CALCULATION AND DISPLAY FUNCTIONS
+        // ============================================
+        
+        function displayGreeks(data) {
+            const greeksSection = document.getElementById('greeksSection');
+            const greeksGrid = document.getElementById('greeksGrid');
+            const projectionGrid = document.getElementById('projectionGrid');
+            
+            if (data.length === 0) {
+                greeksSection.style.display = 'none';
+                return;
+            }
+            
+            // Calculate collective Greeks
+            const greeks = calculateCollectiveGreeks(data);
+            
+            // Extract current spot price from data
+            let spotPrice = null;
+            for (const item of data) {
+                if (item.underlying_price) {
+                    spotPrice = parseFloat(item.underlying_price);
+                    break;
+                }
+            }
+            
+            // If we don't have spot price, can't calculate projections accurately
+            if (!spotPrice || spotPrice <= 0) {
+                console.warn('No underlying_price found in data, skipping projections');
+                greeksSection.style.display = 'none';
+                return;
+            }
+            
+            // Display Greeks cards
+            greeksGrid.innerHTML = `
+                <div class="greek-card">
+                    <div class="label">Total Delta (Δ)</div>
+                    <div class="value">${greeks.totalDelta.toFixed(2)}</div>
+                    <div class="subtitle">Directional exposure</div>
+                </div>
+                <div class="greek-card">
+                    <div class="label">Total Gamma (Γ)</div>
+                    <div class="value">${greeks.totalGamma.toFixed(3)}</div>
+                    <div class="subtitle">Delta sensitivity</div>
+                </div>
+                <div class="greek-card">
+                    <div class="label">Net Position</div>
+                    <div class="value">${greeks.totalNotional.toLocaleString(undefined, {maximumFractionDigits: 0})}</div>
+                    <div class="subtitle">Total notional value</div>
+                </div>
+                <div class="greek-card">
+                    <div class="label">Instruments</div>
+                    <div class="value">${greeks.instrumentCount}</div>
+                    <div class="subtitle">With Greeks data</div>
+                </div>
+            `;
+            
+            // Calculate price projections for different scenarios
+            const projections = [
+                { label: '+5% Up Move', change: 5, icon: '🚀' },
+                { label: '+1% Up Move', change: 1, icon: '📈' },
+                { label: '-1% Down Move', change: -1, icon: '📉' },
+                { label: '-5% Down Move', change: -5, icon: '💥' }
+            ];
+            
+            let projectionsHTML = '';
+            projections.forEach(proj => {
+                const result = calculatePriceProjection(greeks, proj.change, spotPrice);
+                const isPositive = result.gammaAdjusted >= 0;
+                const plClass = isPositive ? 'positive' : 'negative';
+                const sign = isPositive ? '+' : '';
+                
+                projectionsHTML += `
+                    <div class="projection-card">
+                        <div class="scenario">${proj.icon} ${proj.label}</div>
+                        <div class="pl-value ${plClass}">${sign}${result.gammaAdjusted.toLocaleString(undefined, {maximumFractionDigits: 0})}</div>
+                        <div class="details">
+                            Linear: ${sign}${result.linear.toFixed(0)} | 
+                            Gamma adj: ${(result.gammaAdjusted - result.linear).toFixed(0)}
+                        </div>
+                    </div>
+                `;
+            });
+            
+            projectionGrid.innerHTML = projectionsHTML;
+            greeksSection.style.display = 'block';
+            
+            // Render the chart with actual filtered data
+            renderGreeksChart(data);
+        }
+        
+        function calculateCollectiveGreeks(instruments) {
+            let totalDelta = 0;
+            let totalGamma = 0;
+            let totalNotional = 0;
+            let count = 0;
+            
+            instruments.forEach(item => {
+                const openInterest = parseFloat(item.open_interest) || 0;
+                if (openInterest <= 0) return;
+                
+                const markPrice = parseFloat(item.mark_price) || 0;
+                const markIV = parseFloat(item.mark_iv) || 0;
+                const instrumentName = item.instrument_name || '';
+                
+                if (markIV > 0 && markPrice > 0) {
+                    // Simplified Greeks estimation
+                    // In production, use proper Black-Scholes with actual strike, spot, and time to expiry
+                    const isCall = instrumentName.endsWith('-C');
+                    
+                    // Extract strike from instrument name (e.g., BTC-3OCT25-120000-C)
+                    const parts = instrumentName.split('-');
+                    const strike = parseFloat(parts[2]);
+                    
+                    // Get actual spot price from data
+                    const spotPrice = parseFloat(item.underlying_price);
+                    
+                    // Skip if we can't parse required values
+                    if (!strike || !spotPrice || strike <= 0 || spotPrice <= 0) return;
+                    
+                    const moneyness = spotPrice / strike;
+                    
+                    // Delta estimation based on moneyness
+                    let estimatedDelta;
+                    if (isCall) {
+                        if (moneyness > 1.1) estimatedDelta = 0.8;      // Deep ITM
+                        else if (moneyness > 1.02) estimatedDelta = 0.6; // ITM
+                        else if (moneyness > 0.98) estimatedDelta = 0.5; // ATM
+                        else if (moneyness > 0.9) estimatedDelta = 0.3;  // OTM
+                        else estimatedDelta = 0.1;                        // Deep OTM
+                    } else {
+                        if (moneyness > 1.1) estimatedDelta = -0.2;      // Deep OTM
+                        else if (moneyness > 1.02) estimatedDelta = -0.4; // OTM
+                        else if (moneyness > 0.98) estimatedDelta = -0.5; // ATM
+                        else if (moneyness > 0.9) estimatedDelta = -0.7;  // ITM
+                        else estimatedDelta = -0.9;                        // Deep ITM
+                    }
+                    
+                    // Gamma estimation (highest for ATM options)
+                    let estimatedGamma;
+                    if (moneyness > 0.95 && moneyness < 1.05) {
+                        estimatedGamma = 0.015; // ATM
+                    } else if (moneyness > 0.9 && moneyness < 1.1) {
+                        estimatedGamma = 0.008; // Near money
+                    } else {
+                        estimatedGamma = 0.002; // Far from money
+                    }
+                    
+                    // Adjust for IV (higher IV = lower gamma)
+                    estimatedGamma = estimatedGamma / (1 + markIV);
+                    
+                    // Weight by position size
+                    const positionDelta = estimatedDelta * openInterest;
+                    const positionGamma = estimatedGamma * openInterest;
+                    const positionNotional = markPrice * openInterest * spotPrice; // Convert to USD
+                    
+                    totalDelta += positionDelta;
+                    totalGamma += positionGamma;
+                    totalNotional += positionNotional;
+                    count++;
+                }
+            });
+            
+            return {
+                totalDelta,
+                totalGamma,
+                weightedDelta: count > 0 ? totalDelta / count : 0,
+                weightedGamma: count > 0 ? totalGamma / count : 0,
+                totalNotional,
+                instrumentCount: count
+            };
+        }
+        
+        function calculatePriceProjection(greeks, priceChangePercent, underlyingPrice) {
+            // Use actual underlying price from data
+            const priceChange = underlyingPrice * (priceChangePercent / 100);
+            
+            // Linear projection: P&L = Delta × ΔPrice
+            const linear = greeks.totalDelta * priceChange;
+            
+            // Gamma-adjusted projection: P&L = Delta × ΔP + 0.5 × Gamma × ΔP²
+            const gammaAdjustment = 0.5 * greeks.totalGamma * priceChange * priceChange;
+            const gammaAdjusted = linear + gammaAdjustment;
+            
+            return {
+                linear,
+                gammaAdjusted,
+                gammaAdjustment
+            };
+        }
+        
+        // Global chart instance
+        let greeksChartInstance = null;
+        
+        function renderGreeksChart(data) {
+            const ctx = document.getElementById('greeksChart');
+            if (!ctx) return;
+            
+            // Destroy previous chart instance if exists
+            if (greeksChartInstance) {
+                greeksChartInstance.destroy();
+            }
+            
+            // Extract current spot price from actual data
+            let currentSpot = null;
+            for (const item of data) {
+                if (item.underlying_price) {
+                    currentSpot = parseFloat(item.underlying_price);
+                    break;
+                }
+            }
+            
+            // If we don't have spot price, can't render chart
+            if (!currentSpot || currentSpot <= 0) {
+                console.error('Cannot render chart: no underlying_price found in data');
+                return;
+            }
+            
+            console.log('Chart using spot price:', currentSpot);
+            
+            // Generate price range: -20% to +20% from current spot
+            const priceRange = [];
+            const collectiveDeltaValues = [];
+            const collectiveGammaValues = [];
+            const valueProjValues = [];
+            
+            const numPoints = 41; // -20 to +20 in 1% increments
+            
+            // For each price point, recalculate collective Greeks based on actual filtered data
+            for (let i = 0; i < numPoints; i++) {
+                const percentChange = -20 + i;
+                const spotPrice = currentSpot * (1 + percentChange / 100);
+                priceRange.push(spotPrice);
+                
+                // Calculate collective Greeks at this spot price using filtered instruments
+                let totalDelta = 0;
+                let totalGamma = 0;
+                let totalWeightedValue = 0;
+                
+                data.forEach(item => {
+                    const openInterest = parseFloat(item.open_interest) || 0;
+                    if (openInterest <= 0) return;
+                    
+                    const markPrice = parseFloat(item.mark_price) || 0;
+                    const markIV = parseFloat(item.mark_iv) || 0;
+                    const instrumentName = item.instrument_name || '';
+                    
+                    if (markIV > 0 && markPrice > 0) {
+                        const isCall = instrumentName.endsWith('-C');
+                        
+                        // Extract strike from instrument name
+                        const parts = instrumentName.split('-');
+                        const strike = parseFloat(parts[2]);
+                        
+                        // Skip if strike is invalid
+                        if (!strike || strike <= 0) return;
+                        
+                        // Calculate moneyness at this price point
+                        const moneyness = spotPrice / strike;
+                        
+                        // Recalculate Delta based on moneyness at this price
+                        let estimatedDelta;
+                        if (isCall) {
+                            if (moneyness > 1.1) estimatedDelta = 0.8;
+                            else if (moneyness > 1.02) estimatedDelta = 0.6;
+                            else if (moneyness > 0.98) estimatedDelta = 0.5;
+                            else if (moneyness > 0.9) estimatedDelta = 0.3;
+                            else estimatedDelta = 0.1;
+                        } else {
+                            if (moneyness > 1.1) estimatedDelta = -0.2;
+                            else if (moneyness > 1.02) estimatedDelta = -0.4;
+                            else if (moneyness > 0.98) estimatedDelta = -0.5;
+                            else if (moneyness > 0.9) estimatedDelta = -0.7;
+                            else estimatedDelta = -0.9;
+                        }
+                        
+                        // Recalculate Gamma based on moneyness at this price
+                        let estimatedGamma;
+                        if (moneyness > 0.95 && moneyness < 1.05) {
+                            estimatedGamma = 0.015; // ATM
+                        } else if (moneyness > 0.9 && moneyness < 1.1) {
+                            estimatedGamma = 0.008; // Near money
+                        } else {
+                            estimatedGamma = 0.002; // Far from money
+                        }
+                        estimatedGamma = estimatedGamma / (1 + markIV);
+                        
+                        // Weight by position size
+                        const positionDelta = estimatedDelta * openInterest;
+                        const positionGamma = estimatedGamma * openInterest;
+                        
+                        totalDelta += positionDelta;
+                        totalGamma += positionGamma;
+                        
+                        // Calculate position value at this price
+                        totalWeightedValue += positionDelta * (spotPrice - currentSpot);
+                    }
+                });
+                
+                collectiveDeltaValues.push(totalDelta);
+                collectiveGammaValues.push(totalGamma);
+                
+                // Value projection includes gamma effect
+                const priceChange = spotPrice - currentSpot;
+                const valueProj = collectiveDeltaValues[i] * priceChange + 
+                                 0.5 * collectiveGammaValues[i] * priceChange * priceChange;
+                valueProjValues.push(valueProj);
+            }
+            
+            // Find max absolute values for normalization
+            const maxDelta = Math.max(...collectiveDeltaValues.map(Math.abs));
+            const maxGamma = Math.max(...collectiveGammaValues.map(Math.abs));
+            const maxValue = Math.max(...valueProjValues.map(Math.abs));
+            
+            // Normalize all values to 0-100 scale for comparison
+            const normalizedDelta = collectiveDeltaValues.map(v => maxDelta !== 0 ? (v / maxDelta) * 50 + 50 : 50);
+            const normalizedGamma = collectiveGammaValues.map(v => maxGamma !== 0 ? (v / maxGamma) * 50 + 50 : 50);
+            const normalizedValue = valueProjValues.map(v => maxValue !== 0 ? (v / maxValue) * 50 + 50 : 50);
+            
+            greeksChartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: priceRange.map(p => p.toFixed(0)),
+                    datasets: [
+                        {
+                            label: 'Collective Delta (Weighted Sum)',
+                            data: normalizedDelta,
+                            borderColor: 'rgb(59, 130, 246)',
+                            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                            borderWidth: 3,
+                            tension: 0.4,
+                            pointRadius: 0,
+                            pointHoverRadius: 6,
+                            fill: false
+                        },
+                        {
+                            label: 'Collective Gamma (Weighted Sum)',
+                            data: normalizedGamma,
+                            borderColor: 'rgb(234, 88, 12)',
+                            backgroundColor: 'rgba(234, 88, 12, 0.1)',
+                            borderWidth: 3,
+                            tension: 0.4,
+                            pointRadius: 0,
+                            pointHoverRadius: 6,
+                            fill: false
+                        },
+                        {
+                            label: 'Portfolio Value Projection',
+                            data: normalizedValue,
+                            borderColor: 'rgb(16, 185, 129)',
+                            backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                            borderWidth: 3,
+                            tension: 0.4,
+                            pointRadius: 0,
+                            pointHoverRadius: 6,
+                            fill: true
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: 'Filtered Portfolio: Collective Greeks (Weighted Sum) vs BTC Price',
+                            font: {
+                                size: 16,
+                                weight: 'bold'
+                            },
+                            color: '#0f172a'
+                        },
+                        legend: {
+                            display: true,
+                            position: 'top',
+                            labels: {
+                                font: {
+                                    size: 12,
+                                    weight: '600'
+                                },
+                                usePointStyle: true,
+                                padding: 15
+                            }
+                        },
+                        tooltip: {
+                            backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                            padding: 12,
+                            titleFont: {
+                                size: 13,
+                                weight: 'bold'
+                            },
+                            bodyFont: {
+                                size: 12
+                            },
+                            callbacks: {
+                                title: function(context) {
+                                    const price = parseFloat(context[0].label);
+                                    const percentChange = ((price - currentSpot) / currentSpot * 100).toFixed(1);
+                                    return `Price: $${price.toLocaleString()} (${percentChange > 0 ? '+' : ''}${percentChange}%)`;
+                                },
+                                label: function(context) {
+                                    const datasetLabel = context.dataset.label;
+                                    const index = context.dataIndex;
+                                    const normalizedValue = context.parsed.y.toFixed(2);
+                                    
+                                    if (datasetLabel === 'Normalized Delta') {
+                                        const actualDelta = collectiveDeltaValues[index].toFixed(2);
+                                        return `Collective Δ: ${actualDelta} (normalized: ${normalizedValue})`;
+                                    } else if (datasetLabel === 'Normalized Gamma') {
+                                        const actualGamma = collectiveGammaValues[index].toFixed(4);
+                                        return `Collective Γ: ${actualGamma} (normalized: ${normalizedValue})`;
+                                    } else {
+                                        const actualValue = valueProjValues[index].toFixed(0);
+                                        return `Portfolio P&L: $${parseFloat(actualValue).toLocaleString()} (norm: ${normalizedValue})`;
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'Underlying Price ($)',
+                                font: {
+                                    size: 13,
+                                    weight: 'bold'
+                                },
+                                color: '#475569'
+                            },
+                            ticks: {
+                                maxTicksLimit: 11,
+                                font: {
+                                    size: 11
+                                },
+                                color: '#64748b',
+                                callback: function(value, index) {
+                                    // Show every 4th label (every 4%)
+                                    if (index % 4 === 0) {
+                                        return '$' + this.getLabelForValue(value).slice(0, -3) + 'K';
+                                    }
+                                    return '';
+                                }
+                            },
+                            grid: {
+                                color: 'rgba(148, 163, 184, 0.1)',
+                                drawBorder: false
+                            }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: 'Normalized Values (0-100 scale)',
+                                font: {
+                                    size: 13,
+                                    weight: 'bold'
+                                },
+                                color: '#475569'
+                            },
+                            min: 0,
+                            max: 100,
+                            ticks: {
+                                font: {
+                                    size: 11
+                                },
+                                color: '#64748b',
+                                stepSize: 20
+                            },
+                            grid: {
+                                color: 'rgba(148, 163, 184, 0.1)',
+                                drawBorder: false
+                            }
+                        }
+                    }
+                }
+            });
+            
+            // Update chart info
+            const chartInfo = document.getElementById('chartInfo');
+            chartInfo.innerHTML = `
+                <div class="chart-info-item">
+                    <span class="label">Current Spot:</span>
+                    <span class="value">$${currentSpot.toLocaleString()}</span>
+                </div>
+                <div class="chart-info-item">
+                    <span class="label">Price Range:</span>
+                    <span class="value">$${(currentSpot * 0.8).toFixed(0)} - $${(currentSpot * 1.2).toFixed(0)}</span>
+                </div>
+                <div class="chart-info-item">
+                    <span class="label">Max Delta:</span>
+                    <span class="value">${maxDelta.toFixed(2)}</span>
+                </div>
+                <div class="chart-info-item">
+                    <span class="label">Max Gamma:</span>
+                    <span class="value">${(maxGamma / 10).toFixed(4)}</span>
+                </div>
+                <div class="chart-info-item">
+                    <span class="label">Max P&L Impact:</span>
+                    <span class="value">±$${maxValue.toLocaleString(undefined, {maximumFractionDigits: 0})}</span>
+                </div>
+            `;
         }
         
         window.addEventListener('load', () => {
