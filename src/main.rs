@@ -10,6 +10,15 @@ struct OptionsRequest {
     currency: String,
     creation_from: Option<String>,
     creation_to: Option<String>,
+    include_expired: Option<bool>,
+}
+
+// Keep the old one for backwards compatibility if needed
+#[derive(Debug, Serialize, Deserialize)]
+struct OptionsRequestOld {
+    currency: String,
+    creation_from: Option<String>,
+    creation_to: Option<String>,
     expiry_from: Option<String>,
     expiry_to: Option<String>,
     oi_min: Option<f64>,
@@ -23,16 +32,11 @@ async fn get_options(query: web::Query<OptionsRequest>) -> Result<HttpResponse> 
     let kind = "option";
     let expired = query.include_expired.unwrap_or(false);
     
-    // Debug: Print all query parameters
+    // Debug: Print query parameters
     println!("=== Query Parameters ===");
     println!("currency: {}", currency);
     println!("creation_from: {:?}", query.creation_from);
     println!("creation_to: {:?}", query.creation_to);
-    println!("expiry_from: {:?}", query.expiry_from);
-    println!("expiry_to: {:?}", query.expiry_to);
-    println!("oi_min: {:?}", query.oi_min);
-    println!("oi_max: {:?}", query.oi_max);
-    println!("option_type: {:?}", query.option_type);
     println!("include_expired: {}", expired);
     println!("========================");
     
@@ -78,66 +82,8 @@ async fn get_options(query: web::Query<OptionsRequest>) -> Result<HttpResponse> 
                 }
             }
             
-            // Apply filters
+            // Apply ONLY creation date filter (all other filtering done client-side)
             let mut filtered_instruments: Vec<Value> = instruments.clone();
-            
-            // Filter by option type (call/put)
-            if let Some(opt_type) = &query.option_type {
-                if !opt_type.is_empty() && opt_type != "all" {
-                    filtered_instruments.retain(|inst| {
-                        if let Some(instrument_name) = inst.get("instrument_name").and_then(|v| v.as_str()) {
-                            let is_call = instrument_name.ends_with("-C");
-                            let is_put = instrument_name.ends_with("-P");
-                            match opt_type.as_str() {
-                                "call" => is_call,
-                                "put" => is_put,
-                                _ => true,
-                            }
-                        } else {
-                            false
-                        }
-                    });
-                }
-            }
-            
-            // Filter by expiration date
-            if let Some(expiry_from) = &query.expiry_from {
-                if !expiry_from.is_empty() {
-                    if let Ok(from_timestamp) = chrono::NaiveDate::parse_from_str(expiry_from, "%Y-%m-%d") {
-                        let from_ts = from_timestamp.and_hms_opt(0, 0, 0).unwrap().timestamp_millis();
-                        println!("Filtering expiry_from: {} -> timestamp: {}", expiry_from, from_ts);
-                        let count_before = filtered_instruments.len();
-                        filtered_instruments.retain(|inst| {
-                            if let Some(exp_ts) = inst.get("expiration_timestamp").and_then(|v| v.as_i64()) {
-                                exp_ts >= from_ts
-                            } else {
-                                // Remove instruments without expiration_timestamp (shouldn't happen for options)
-                                false
-                            }
-                        });
-                        println!("After expiry_from filter: {} -> {} instruments", count_before, filtered_instruments.len());
-                    }
-                }
-            }
-            
-            if let Some(expiry_to) = &query.expiry_to {
-                if !expiry_to.is_empty() {
-                    if let Ok(to_timestamp) = chrono::NaiveDate::parse_from_str(expiry_to, "%Y-%m-%d") {
-                        let to_ts = to_timestamp.and_hms_opt(23, 59, 59).unwrap().timestamp_millis();
-                        println!("Filtering expiry_to: {} -> timestamp: {}", expiry_to, to_ts);
-                        let count_before = filtered_instruments.len();
-                        filtered_instruments.retain(|inst| {
-                            if let Some(exp_ts) = inst.get("expiration_timestamp").and_then(|v| v.as_i64()) {
-                                exp_ts <= to_ts
-                            } else {
-                                // Remove instruments without expiration_timestamp (shouldn't happen for options)
-                                false
-                            }
-                        });
-                        println!("After expiry_to filter: {} -> {} instruments", count_before, filtered_instruments.len());
-                    }
-                }
-            }
             
             // Filter by creation timestamp (optional - only filter if explicitly set)
             if let Some(creation_from) = &query.creation_from {
@@ -178,7 +124,7 @@ async fn get_options(query: web::Query<OptionsRequest>) -> Result<HttpResponse> 
                 }
             }
             
-            println!("After filtering: {} instruments", filtered_instruments.len());
+            println!("After server-side filtering: {} instruments (client-side filtering will be applied in browser)", filtered_instruments.len());
             
             // Limit to avoid too many API calls
             let limited_instruments: Vec<Value> = filtered_instruments.into_iter().take(100).collect();
@@ -240,38 +186,10 @@ async fn get_options(query: web::Query<OptionsRequest>) -> Result<HttpResponse> 
             }
             
             // Execute all futures concurrently
-            let mut enriched_data = join_all(futures).await;
+            let enriched_data = join_all(futures).await;
             
-            // Filter by open interest range (optional - only filter if explicitly set)
-            if let Some(oi_min) = query.oi_min {
-                println!("Filtering OI minimum: {}", oi_min);
-                let count_before = enriched_data.len();
-                enriched_data.retain(|inst| {
-                    if let Some(oi) = inst.get("open_interest").and_then(|v| v.as_f64()) {
-                        oi >= oi_min
-                    } else {
-                        // Keep instruments without OI data when filtering by minimum
-                        true
-                    }
-                });
-                println!("After OI min filter: {} -> {} instruments", count_before, enriched_data.len());
-            }
-            
-            if let Some(oi_max) = query.oi_max {
-                println!("Filtering OI maximum: {}", oi_max);
-                let count_before = enriched_data.len();
-                enriched_data.retain(|inst| {
-                    if let Some(oi) = inst.get("open_interest").and_then(|v| v.as_f64()) {
-                        oi <= oi_max
-                    } else {
-                        // Keep instruments without OI data when filtering by maximum
-                        true
-                    }
-                });
-                println!("After OI max filter: {} -> {} instruments", count_before, enriched_data.len());
-            }
-            
-            println!("Successfully fetched data for {} instruments", enriched_data.len());
+            // No server-side filtering by OI - done client-side now
+            println!("Successfully fetched data for {} instruments (all filtering except creation date will be done client-side)", enriched_data.len());
             
             return Ok(HttpResponse::Ok().json(serde_json::json!({
                 "result": enriched_data
@@ -930,8 +848,10 @@ async fn index() -> Result<HttpResponse> {
             <p>Advanced filtering for cryptocurrency options with Open Interest, Volume, and IV</p>
         </div>
         
+        <!-- PART 1: DATA FETCHING SECTION -->
         <div class="fetch-section">
-            <div class="filters-title">📊 Filter Options</div>
+            <div class="filters-title">� Step 1: Fetch Data from API</div>
+            <p style="color: #64748b; margin-bottom: 20px; font-size: 14px;">Fetch options data from Deribit. Use creation date to limit the data volume.</p>
             
             <div class="form-grid">
                 <div class="form-group">
@@ -945,41 +865,12 @@ async fn index() -> Result<HttpResponse> {
                 </div>
                 
                 <div class="form-group">
-                    <label for="optionType">📈 Option Type</label>
-                    <select id="optionType">
-                        <option value="all">All (Calls & Puts)</option>
-                        <option value="call">Calls Only</option>
-                        <option value="put">Puts Only</option>
-                    </select>
-                </div>
-                
-                <div class="form-group">
-                    <label>
-                        📅 Creation Date Range <span style="opacity: 0.6; font-weight: 400;">(Optional - </span>
-                        <a href="javascript:void(0)" onclick="document.getElementById('creationFrom').value=''; document.getElementById('creationTo').value=''; return false;" style="color: #2a5298; text-decoration: underline; font-weight: 400; font-size: 12px;">Clear</a>
-                        <span style="opacity: 0.6; font-weight: 400;">)</span>
-                    </label>
+                    <label>📅 Creation Date Range <span style="opacity: 0.6; font-weight: 400;">(Optional)</span></label>
                     <div class="range-inputs">
                         <input type="date" id="creationFrom" placeholder="From" title="Leave empty to include all" autocomplete="off">
                         <input type="date" id="creationTo" placeholder="To" title="Leave empty to include all" autocomplete="off">
                     </div>
-                    <small style="color: #64748b; font-size: 11px; margin-top: 4px; display: block;">💡 Tip: Leave empty when filtering by expiry date</small>
-                </div>
-                
-                <div class="form-group">
-                    <label>⏰ Expiration Date Range <span style="opacity: 0.6; font-weight: 400;">(Optional)</span></label>
-                    <div class="range-inputs">
-                        <input type="date" id="expiryFrom" placeholder="From" title="Leave empty to include all">
-                        <input type="date" id="expiryTo" placeholder="To" title="Leave empty to include all">
-                    </div>
-                </div>
-                
-                <div class="form-group">
-                    <label>📊 Open Interest Range <span style="opacity: 0.6; font-weight: 400;">(Optional)</span></label>
-                    <div class="range-inputs">
-                        <input type="number" id="oiMin" placeholder="Min" step="0.01" title="Leave empty to include all">
-                        <input type="number" id="oiMax" placeholder="Max" step="0.01" title="Leave empty to include all">
-                    </div>
+                    <small style="color: #64748b; font-size: 11px; margin-top: 4px; display: block;">💡 Filters options by when they were created</small>
                 </div>
                 
                 <div class="form-group">
@@ -992,7 +883,61 @@ async fn index() -> Result<HttpResponse> {
             
             <div class="button-group">
                 <button class="btn-fetch" id="fetchBtn" onclick="fetchData()">🚀 Fetch Options Data</button>
-                <button class="btn-reset" onclick="resetFilters()">🔄 Reset Filters</button>
+                <button class="btn-reset" onclick="resetFilters()">🔄 Reset All</button>
+            </div>
+        </div>
+        
+        <!-- PART 2: CLIENT-SIDE FILTERING SECTION -->
+        <div class="fetch-section" id="filterSection" style="display: none;">
+            <div class="filters-title">🔍 Step 2: Filter Fetched Data</div>
+            <p style="color: #64748b; margin-bottom: 20px; font-size: 14px;">Apply filters to the fetched data instantly (no additional API calls).</p>
+            
+            <div class="form-grid">
+                <div class="form-group">
+                    <label for="optionType">📈 Option Type</label>
+                    <select id="optionType" onchange="applyClientFilters()">
+                        <option value="all">All (Calls & Puts)</option>
+                        <option value="call">Calls Only</option>
+                        <option value="put">Puts Only</option>
+                    </select>
+                </div>
+                
+                <div class="form-group">
+                    <label>⏰ Expiration Date Range</label>
+                    <div class="range-inputs">
+                        <input type="date" id="expiryFrom" placeholder="From" onchange="applyClientFilters()">
+                        <input type="date" id="expiryTo" placeholder="To" onchange="applyClientFilters()">
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label>📊 Open Interest Range</label>
+                    <div class="range-inputs">
+                        <input type="number" id="oiMin" placeholder="Min" step="0.01" onchange="applyClientFilters()">
+                        <input type="number" id="oiMax" placeholder="Max" step="0.01" onchange="applyClientFilters()">
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label>📈 24h Volume Range</label>
+                    <div class="range-inputs">
+                        <input type="number" id="volumeMin" placeholder="Min" step="0.01" onchange="applyClientFilters()">
+                        <input type="number" id="volumeMax" placeholder="Max" step="0.01" onchange="applyClientFilters()">
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <label>💹 IV % Range</label>
+                    <div class="range-inputs">
+                        <input type="number" id="ivMin" placeholder="Min" step="0.1" onchange="applyClientFilters()">
+                        <input type="number" id="ivMax" placeholder="Max" step="0.1" onchange="applyClientFilters()">
+                    </div>
+                </div>
+            </div>
+            
+            <div class="button-group">
+                <button class="btn-fetch" onclick="applyClientFilters()" style="background: linear-gradient(135deg, #059669 0%, #047857 100%);">� Apply Filters</button>
+                <button class="btn-reset" onclick="clearClientFilters()">🔄 Clear Filters</button>
             </div>
         </div>
         
@@ -1013,69 +958,74 @@ async fn index() -> Result<HttpResponse> {
     </div>
     
     <script>
-        let allData = [];
+        let allFetchedData = [];  // Stores all data fetched from API
+        let filteredData = [];     // Stores data after client-side filtering
         
         function resetFilters() {
+            // Reset Part 1 (Fetch)
             document.getElementById('currency').value = 'BTC';
-            document.getElementById('optionType').value = 'all';
             document.getElementById('creationFrom').value = '';
             document.getElementById('creationTo').value = '';
+            document.getElementById('includeExpired').checked = false;
+            
+            // Reset Part 2 (Filters)
+            clearClientFilters();
+            
+            // Hide filter section and clear data
+            document.getElementById('filterSection').style.display = 'none';
+            allFetchedData = [];
+            filteredData = [];
+            document.getElementById('tableContainer').innerHTML = '';
+            document.getElementById('stats').style.display = 'none';
+        }
+        
+        function clearClientFilters() {
+            document.getElementById('optionType').value = 'all';
             document.getElementById('expiryFrom').value = '';
             document.getElementById('expiryTo').value = '';
             document.getElementById('oiMin').value = '';
             document.getElementById('oiMax').value = '';
-            document.getElementById('includeExpired').checked = false;
+            document.getElementById('volumeMin').value = '';
+            document.getElementById('volumeMax').value = '';
+            document.getElementById('ivMin').value = '';
+            document.getElementById('ivMax').value = '';
+            
+            // Re-apply filters (which will show all data since filters are cleared)
+            if (allFetchedData.length > 0) {
+                applyClientFilters();
+            }
         }
         
         async function fetchData() {
             const currency = document.getElementById('currency').value;
-            const optionType = document.getElementById('optionType').value;
             const creationFrom = document.getElementById('creationFrom').value;
             const creationTo = document.getElementById('creationTo').value;
-            const expiryFrom = document.getElementById('expiryFrom').value;
-            const expiryTo = document.getElementById('expiryTo').value;
-            const oiMin = document.getElementById('oiMin').value;
-            const oiMax = document.getElementById('oiMax').value;
             const includeExpired = document.getElementById('includeExpired').checked;
             
             const loading = document.getElementById('loading');
             const tableContainer = document.getElementById('tableContainer');
             const errorDiv = document.getElementById('error');
-            const warningDiv = document.getElementById('warning');
             const statsDiv = document.getElementById('stats');
             const fetchBtn = document.getElementById('fetchBtn');
-            
-            // Warning if creation dates might filter out expiry results
-            if ((creationFrom || creationTo) && (expiryFrom || expiryTo)) {
-                console.warn('⚠️ Both creation and expiry dates are set. Creation date filters may exclude options.');
-                console.warn('💡 Tip: Leave creation date fields empty when filtering by expiry date.');
-                warningDiv.innerHTML = '⚠️ <strong>Warning:</strong> Both creation and expiry date filters are active. This may return no results if options were created outside the creation date range. <a href="javascript:void(0)" onclick="document.getElementById(\'creationFrom\').value=\'\'; document.getElementById(\'creationTo\').value=\'\'; fetchData();" style="color: #92400e; text-decoration: underline; font-weight: 700;">Click here to clear creation dates and retry.</a>';
-                warningDiv.style.display = 'block';
-            } else {
-                warningDiv.style.display = 'none';
-            }
+            const filterSection = document.getElementById('filterSection');
             
             loading.style.display = 'block';
             tableContainer.innerHTML = '';
             errorDiv.style.display = 'none';
             statsDiv.style.display = 'none';
+            filterSection.style.display = 'none';
             fetchBtn.disabled = true;
             
             try {
                 const params = new URLSearchParams({
                     currency: currency,
-                    option_type: optionType,
                     include_expired: includeExpired
                 });
                 
                 if (creationFrom) params.append('creation_from', creationFrom);
                 if (creationTo) params.append('creation_to', creationTo);
-                if (expiryFrom) params.append('expiry_from', expiryFrom);
-                if (expiryTo) params.append('expiry_to', expiryTo);
-                if (oiMin) params.append('oi_min', oiMin);
-                if (oiMax) params.append('oi_max', oiMax);
                 
-                console.log('Fetching data with params:', params.toString());
+                console.log('Fetching data from API with params:', params.toString());
                 const response = await fetch(`/api/options?${params}`, {
                     method: 'GET',
                     headers: {
@@ -1097,10 +1047,14 @@ async fn index() -> Result<HttpResponse> {
                 fetchBtn.disabled = false;
                 
                 if (data.result && data.result.length > 0) {
-                    allData = data.result;
-                    console.log('Processing', allData.length, 'instruments');
-                    displayStats(data.result);
-                    displayTable(data.result);
+                    allFetchedData = data.result;
+                    console.log('✅ Fetched', allFetchedData.length, 'instruments from API');
+                    
+                    // Show the filter section now that we have data
+                    filterSection.style.display = 'block';
+                    
+                    // Apply client-side filters (initially no filters, so show all)
+                    applyClientFilters();
                 } else {
                     tableContainer.innerHTML = '<div class="no-data">No options data found for the selected criteria. Try adjusting your filters.</div>';
                 }
@@ -1111,6 +1065,87 @@ async fn index() -> Result<HttpResponse> {
                 errorDiv.innerHTML = `<div class="error">❌ Error fetching data: ${error.message}</div>`;
                 errorDiv.style.display = 'block';
             }
+        }
+        
+        function applyClientFilters() {
+            if (allFetchedData.length === 0) {
+                console.warn('No data to filter');
+                return;
+            }
+            
+            console.log('🔍 Applying client-side filters to', allFetchedData.length, 'instruments');
+            
+            const optionType = document.getElementById('optionType').value;
+            const expiryFrom = document.getElementById('expiryFrom').value;
+            const expiryTo = document.getElementById('expiryTo').value;
+            const oiMin = document.getElementById('oiMin').value;
+            const oiMax = document.getElementById('oiMax').value;
+            const volumeMin = document.getElementById('volumeMin').value;
+            const volumeMax = document.getElementById('volumeMax').value;
+            const ivMin = document.getElementById('ivMin').value;
+            const ivMax = document.getElementById('ivMax').value;
+            
+            filteredData = allFetchedData.filter(item => {
+                // Filter by option type
+                if (optionType && optionType !== 'all') {
+                    const instrumentName = item.instrument_name || '';
+                    const isCall = instrumentName.endsWith('-C');
+                    const isPut = instrumentName.endsWith('-P');
+                    if (optionType === 'call' && !isCall) return false;
+                    if (optionType === 'put' && !isPut) return false;
+                }
+                
+                // Filter by expiration date
+                if (expiryFrom || expiryTo) {
+                    const expTs = item.expiration_timestamp;
+                    if (!expTs) return false;
+                    
+                    if (expiryFrom) {
+                        const fromDate = new Date(expiryFrom);
+                        fromDate.setHours(0, 0, 0, 0);
+                        if (expTs < fromDate.getTime()) return false;
+                    }
+                    
+                    if (expiryTo) {
+                        const toDate = new Date(expiryTo);
+                        toDate.setHours(23, 59, 59, 999);
+                        if (expTs > toDate.getTime()) return false;
+                    }
+                }
+                
+                // Filter by open interest
+                if (oiMin || oiMax) {
+                    const oi = parseFloat(item.open_interest);
+                    if (isNaN(oi)) return false;
+                    if (oiMin && oi < parseFloat(oiMin)) return false;
+                    if (oiMax && oi > parseFloat(oiMax)) return false;
+                }
+                
+                // Filter by volume
+                if (volumeMin || volumeMax) {
+                    const volume = parseFloat(item.volume_24h);
+                    if (isNaN(volume)) return false;
+                    if (volumeMin && volume < parseFloat(volumeMin)) return false;
+                    if (volumeMax && volume > parseFloat(volumeMax)) return false;
+                }
+                
+                // Filter by IV
+                if (ivMin || ivMax) {
+                    const iv = parseFloat(item.mark_iv);
+                    if (isNaN(iv)) return false;
+                    const ivPercent = iv * 100;
+                    if (ivMin && ivPercent < parseFloat(ivMin)) return false;
+                    if (ivMax && ivPercent > parseFloat(ivMax)) return false;
+                }
+                
+                return true;
+            });
+            
+            console.log('✅ After filtering:', filteredData.length, 'instruments match criteria');
+            
+            // Display the filtered results
+            displayStats(filteredData);
+            displayTable(filteredData);
         }
         
         function displayStats(data) {
@@ -1295,10 +1330,12 @@ async fn index() -> Result<HttpResponse> {
         }
         
         window.addEventListener('load', () => {
-            // Always clear creation date fields on page load to prevent confusion
+            // Clear all fields on page load
             document.getElementById('creationFrom').value = '';
             document.getElementById('creationTo').value = '';
-            fetchData();
+            clearClientFilters();
+            // Don't auto-fetch on load - let user click the button
+            console.log('👋 Ready! Click "Fetch Options Data" to begin.');
         });
     </script>
 </body>
