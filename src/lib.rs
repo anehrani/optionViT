@@ -1,5 +1,13 @@
+// Module declarations
+pub mod api_client;
+pub mod filters;
+pub mod handlers;
+pub mod types;
+pub mod ui;
 
-
-//pub mod data_utils;
-
-//pub use crate::data_utils::{download_deribit_data, download_deribit_instruments, fetch_available_expiries, DeribitClient};
+// Re-exports for convenience
+pub use api_client::DeribitClient;
+pub use filters::{filter_by_creation_date, print_sample_instruments};
+pub use handlers::get_options;
+pub use types::{OptionsRequest, OptionsRequestOld};
+pub use ui::index;
